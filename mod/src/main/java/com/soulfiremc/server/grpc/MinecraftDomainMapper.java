@@ -106,7 +106,7 @@ public final class MinecraftDomainMapper {
       .setFingerprint(fingerprint(stack));
     var customName = stack.getCustomName();
     if (customName != null) {
-      builder.setCustomName(text(customName.getString()));
+      builder.setCustomName(text(customName));
     }
     for (var entry : stack.getEnchantments().entrySet()) {
       var enchantmentId = entry.getKey().unwrapKey()

@@ -49,7 +49,7 @@ public class MixinEventLoopGroupHolder {
     if (allowNativeTransport
       && connection != null
       && connection.settingsSource().get(BotSettings.USE_IO_URING)
-      && !BedrockProtocolVersion.BEDROCK_LATEST.equals(
+      && !BedrockProtocolVersion.PROTOCOLS.contains(
       connection.settingsSource().get(BotSettings.PROTOCOL_VERSION, BotSettings.PROTOCOL_VERSION_PARSER))
       && IoUring.isAvailable()) {
       cir.setReturnValue(IO_URING);

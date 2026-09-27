@@ -40,7 +40,7 @@ public class MixinConnection$1 {
 
     var proxyData = botConnection.proxy();
     if (proxyData != null) {
-      var isBedrock = BedrockProtocolVersion.BEDROCK_LATEST.equals(botConnection.currentProtocolVersion());
+      var isBedrock = BedrockProtocolVersion.PROTOCOLS.contains(botConnection.currentProtocolVersion());
       NettyHelper.addProxy(proxyData, channel, isBedrock);
     }
 
