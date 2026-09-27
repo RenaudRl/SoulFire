@@ -44,7 +44,7 @@ final class BotConnectionFactoryTest {
   @Test
   void leavesModernAndBedrockResolutionToTheirOwnConnectionPaths() {
     var original = new ServerAddress("example.test", 25565);
-    for (var version : new ProtocolVersion[]{ProtocolVersion.v1_17, BedrockProtocolVersion.bedrockLatest}) {
+    for (var version : new ProtocolVersion[]{ProtocolVersion.v1_17, BedrockProtocolVersion.BEDROCK_LATEST}) {
       assertSame(original, BotConnectionFactory.resolveLegacyAddress(original, version, _ -> {
         fail("Unexpected legacy SRV lookup");
         return Optional.empty();

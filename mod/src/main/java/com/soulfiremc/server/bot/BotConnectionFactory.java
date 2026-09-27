@@ -41,7 +41,7 @@ public record BotConnectionFactory(
 
   public static ServerAddress parseAddress(String address, ProtocolVersion protocolVersion) {
     HostAndPort hostAndPort = HostAndPort.fromString(address)
-      .withDefaultPort(BedrockProtocolVersion.bedrockLatest.equals(protocolVersion) ? BEDROCK_DEFAULT_PORT : JAVA_DEFAULT_PORT);
+      .withDefaultPort(BedrockProtocolVersion.BEDROCK_LATEST.equals(protocolVersion) ? BEDROCK_DEFAULT_PORT : JAVA_DEFAULT_PORT);
     if (hostAndPort.getHost().isEmpty()) {
       throw new IllegalArgumentException("Invalid host address: " + address);
     }
@@ -55,7 +55,7 @@ public record BotConnectionFactory(
     ServerRedirectHandler redirectHandler) {
     // ViaFabricPlus skips SRV lookup in ServerNameResolver for these versions.
     // Its parseString hook normally handles this, but our parser also supports Bedrock ports.
-    if (!BedrockProtocolVersion.bedrockLatest.equals(protocolVersion)
+    if (!BedrockProtocolVersion.BEDROCK_LATEST.equals(protocolVersion)
       && protocolVersion.olderThanOrEqualTo(ProtocolVersion.v1_16_4)) {
       return redirectHandler.lookupRedirect(address).orElse(address);
     }

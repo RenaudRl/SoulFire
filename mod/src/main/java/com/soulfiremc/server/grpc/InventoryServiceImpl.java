@@ -43,6 +43,7 @@ import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.world.inventory.InventoryMenu;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
@@ -604,6 +605,19 @@ public final class InventoryServiceImpl
     return bot;
   }
 
+  /**
+   * The container title with its JSON component when the open screen carries one: fonts, colours
+   * and shifted glyphs only survive in the component, never in the plain string.
+   */
+  private static TextComponent containerTitle(Context context) {
+    if (context.bot.minecraft().gui.screen() instanceof AbstractContainerScreen<?> screen
+      && screen.getTitle() != null
+      && !(context.menu instanceof InventoryMenu)) {
+      return MinecraftDomainMapper.text(screen.getTitle());
+    }
+    return TextComponent.newBuilder().setPlainText(context.layout.getTitle()).build();
+  }
+
   private static ContainerSnapshot snapshot(Context context) {
     context.refresh();
     var menu = context.menu;
@@ -612,8 +626,7 @@ public final class InventoryServiceImpl
       .setStateId(menu.getStateId())
       .setRevision(revision(context))
       .setContainerType(context.layout.getContainerType())
-      .setTitle(TextComponent.newBuilder()
-        .setPlainText(context.layout.getTitle()))
+      .setTitle(containerTitle(context))
       .setLayout(context.layout)
       .setSelectedHotbarSlot(
         context.player.getInventory().getSelectedSlot()
