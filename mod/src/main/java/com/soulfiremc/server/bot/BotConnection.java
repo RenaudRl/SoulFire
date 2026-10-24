@@ -207,6 +207,7 @@ public final class BotConnection {
   private volatile @Nullable MenuCloseState creativeCursorReturn;
   @Getter(AccessLevel.NONE)
   private long inventoryUpdates;
+  private long containerContentUpdates;
 
   public static BotConnection current() {
     var current = CURRENT.isBound() ? CURRENT.get() : null;
@@ -789,6 +790,12 @@ public final class BotConnection {
 
   public void onInventoryUpdate() {
     inventoryUpdates++;
+  }
+
+  public void onContainerContent(int containerId) {
+    if (minecraft.player != null && minecraft.player.containerMenu.containerId == containerId) {
+      containerContentUpdates++;
+    }
   }
 
   public void tickDisconnectCleanup() {

@@ -497,17 +497,8 @@ public final class InventoryServiceImpl
     InventoryMutation mutation
   ) {
     var result = new AtomicReference<ContainerSnapshot>();
-    var task = new CompletableControlTask(ControlTask.once(
-      description,
-      INVENTORY_RESOURCES,
-      () -> {
-        var context = Context.create(bot);
-        requireRevision(context, expectedRevision);
-        requireEmptyCursor(context);
-        mutation.apply(context);
-        requireEmptyCursor(context);
-        result.set(snapshot(context));
-      }
+    var task = new CompletableControlTask(new InventoryMutationTask(
+      bot, expectedRevision, description, mutation, result
     ));
     try {
       BotThreadExecution.call(bot, () -> {
@@ -1892,6 +1883,112 @@ public final class InventoryServiceImpl
       this.stack = stack;
       this.count = count;
     }
+  }
+
+  private record SlotExpectation(int index, ItemStack item) {}
+
+  private static final class InventoryMutationTask implements ControlTask {
+    private final BotConnection bot;
+    private final long expectedRevision;
+    private final String description;
+    private final InventoryMutation mutation;
+    private final AtomicReference<ContainerSnapshot> result;
+    private Context context;
+    private List<SlotExpectation> expected;
+    private long contentsBefore;
+    private long stableRevision;
+    private int stableTicks;
+    private boolean done;
+
+    private InventoryMutationTask(
+      BotConnection bot,
+      long expectedRevision,
+      String description,
+      InventoryMutation mutation,
+      AtomicReference<ContainerSnapshot> result
+    ) {
+      this.bot = bot;
+      this.expectedRevision = expectedRevision;
+      this.description = description;
+      this.mutation = mutation;
+      this.result = result;
+    }
+
+    @Override
+    public void tick() {
+      if (context == null) {
+        context = Context.create(bot);
+        requireRevision(context, expectedRevision);
+        requireEmptyCursor(context);
+        var menu = context.menu;
+        var before = menu.slots.stream().map(slot -> slot.getItem().copy()).toList();
+        mutation.apply(context);
+        requireEmptyCursor(context);
+        if (context.menu != menu || menu.containerId <= 0
+          || !SFInventoryHelpers.supportsMenuResync(bot.currentProtocolVersion())) {
+          complete();
+          return;
+        }
+        var changes = new ArrayList<SlotExpectation>();
+        var playerChanges = new ArrayList<SlotExpectation>();
+        for (var slot : menu.slots) {
+          if (!ItemStack.matches(before.get(slot.index), slot.getItem())) {
+            var change = new SlotExpectation(slot.index, slot.getItem().copy());
+            changes.add(change);
+            if (matchesArea(InventoryArea.INVENTORY_AREA_PLAYER, area(context.layout, slot.index))) {
+              playerChanges.add(change);
+            }
+          }
+        }
+        if (changes.isEmpty()) {
+          complete();
+          return;
+        }
+        // Other viewers may immediately change the chest again. The bot's
+        // own inventory proves a withdrawal/deposit without locking them out.
+        expected = playerChanges.isEmpty() ? changes : playerChanges;
+        contentsBefore = bot.containerContentUpdates();
+        SFInventoryHelpers.requestMenuContents(context.player.connection, menu);
+        return;
+      }
+
+      if (bot.minecraft().player != context.player || context.player.containerMenu != context.menu) {
+        throw Status.ABORTED.withDescription("The menu changed while confirming inventory changes").asRuntimeException();
+      }
+      if (bot.containerContentUpdates() == contentsBefore) return;
+      var currentRevision = bot.containerContentUpdates();
+      for (var change : expected) {
+        currentRevision = mix(currentRevision, stackIdentity(context.menu.getSlot(change.index).getItem()));
+      }
+      currentRevision = mix(currentRevision, stackIdentity(context.menu.getCarried()));
+      if (currentRevision != stableRevision) {
+        stableRevision = currentRevision;
+        stableTicks = 0;
+        return;
+      }
+      // Several clicks can produce several replies, including intermediate
+      // cursor states. Let the incoming menu updates settle before checking.
+      if (++stableTicks < 2) return;
+      if (!context.menu.getCarried().isEmpty() || expected.stream().anyMatch(change ->
+        !ItemStack.matches(change.item, context.menu.getSlot(change.index).getItem()))) {
+        throw Status.ABORTED.withDescription("The server did not confirm the inventory changes").asRuntimeException();
+      }
+      complete();
+    }
+
+    private void complete() {
+      result.set(snapshot(context));
+      done = true;
+    }
+
+    @Override
+    public boolean isDone() { return done; }
+
+    @Override
+    public Set<ControlResource> resources() { return INVENTORY_RESOURCES; }
+
+    @Override
+    public String description() { return description; }
   }
 
   private static final class Context {

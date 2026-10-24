@@ -237,7 +237,7 @@ export default {
                       to: InventoryArea.PLAYER,
                     }),
                   ),
-                3,
+                4, // Three placement clicks and one authoritative menu resync.
               );
               const furnace = await run(rcon("data get block 4263 64 8 Items"));
               const total = await run(rcon(`clear ${BOT_NAME} iron_ingot 0`));
