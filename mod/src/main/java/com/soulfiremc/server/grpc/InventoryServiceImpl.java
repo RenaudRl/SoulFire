@@ -74,6 +74,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 /// Semantic, revision-aware inventory and container operations.
 public final class InventoryServiceImpl
@@ -496,10 +497,11 @@ public final class InventoryServiceImpl
     String description,
     InventoryMutation mutation
   ) {
-    var result = new AtomicReference<ContainerSnapshot>();
-    var task = new CompletableControlTask(new InventoryMutationTask(
-      bot, expectedRevision, description, mutation, result
-    ));
+    var mutationTask = new InventoryMutationTask<Void>(bot, expectedRevision, description, context -> {
+      mutation.apply(context);
+      return null;
+    });
+    var task = new CompletableControlTask(mutationTask);
     try {
       BotThreadExecution.call(bot, () -> {
         bot.botControl().replace(task);
@@ -527,7 +529,7 @@ public final class InventoryServiceImpl
       }
       return InventoryMutationResponse.newBuilder()
         .setActionId(task.actionId().toString())
-        .setContainer(Objects.requireNonNull(result.get()))
+        .setContainer(mutationTask.container())
         .build();
     });
   }
@@ -1052,25 +1054,24 @@ public final class InventoryServiceImpl
     return true;
   }
 
-  /// Preflights and applies a batch from an already-open menu while a
-  /// server-side task owns the bot's inventory and container resources. No
-  /// click is sent until every exact operation has a complete plan.
-  public static List<Integer> transferBatchForTask(
+  /// Preflights, applies and confirms a batch while its parent task owns the
+  /// inventory and container resources. Tick it until done before reading the
+  /// transferred counts. Exact operations are all planned before any click.
+  public static InventoryMutationTask<List<Integer>> transferBatchForTask(
     BotConnection bot,
     List<ContainerTransferOperation> operations,
     InventoryArea from,
     InventoryArea to
   ) {
-    var context = Context.create(bot);
-    requireEmptyCursor(context);
-    var planned = planTaskBatch(context, operations, from, to);
-    applyMoves(context, planned.moves());
-    requireEmptyCursor(context);
-    return planned.transferred();
-  }
-
-  public static long containerRevisionForTask(BotConnection bot) {
-    return revision(Context.create(bot));
+    var menu = Objects.requireNonNull(bot.minecraft().player).containerMenu;
+    return new InventoryMutationTask<>(bot, 0, "Transfer container batch", context -> {
+      if (context.menu != menu) {
+        throw Status.ABORTED.withDescription("The menu changed before transferring items").asRuntimeException();
+      }
+      var planned = planTaskBatch(context, operations, from, to);
+      applyMoves(context, planned.moves());
+      return planned.transferred();
+    });
   }
 
   private static TaskBatchPlan planTaskBatch(
@@ -1887,12 +1888,14 @@ public final class InventoryServiceImpl
 
   private record SlotExpectation(int index, ItemStack item) {}
 
-  private static final class InventoryMutationTask implements ControlTask {
+  /// Applies a mutation, including server confirmation when the protocol supports it.
+  public static final class InventoryMutationTask<T> implements ControlTask {
     private final BotConnection bot;
     private final long expectedRevision;
     private final String description;
-    private final InventoryMutation mutation;
-    private final AtomicReference<ContainerSnapshot> result;
+    private final Function<Context, T> mutation;
+    private T outcome;
+    private ContainerSnapshot container;
     private Context context;
     private List<SlotExpectation> expected;
     private long contentsBefore;
@@ -1904,14 +1907,12 @@ public final class InventoryServiceImpl
       BotConnection bot,
       long expectedRevision,
       String description,
-      InventoryMutation mutation,
-      AtomicReference<ContainerSnapshot> result
+      Function<Context, T> mutation
     ) {
       this.bot = bot;
       this.expectedRevision = expectedRevision;
       this.description = description;
       this.mutation = mutation;
-      this.result = result;
     }
 
     @Override
@@ -1922,7 +1923,7 @@ public final class InventoryServiceImpl
         requireEmptyCursor(context);
         var menu = context.menu;
         var before = menu.slots.stream().map(slot -> slot.getItem().copy()).toList();
-        mutation.apply(context);
+        outcome = mutation.apply(context);
         requireEmptyCursor(context);
         if (context.menu != menu || menu.containerId <= 0
           || !SFInventoryHelpers.supportsMenuResync(bot.currentProtocolVersion())) {
@@ -1977,8 +1978,22 @@ public final class InventoryServiceImpl
     }
 
     private void complete() {
-      result.set(snapshot(context));
+      container = snapshot(context);
       done = true;
+    }
+
+    public T result() {
+      requireDone();
+      return outcome;
+    }
+
+    public ContainerSnapshot container() {
+      requireDone();
+      return container;
+    }
+
+    private void requireDone() {
+      if (!done) throw new IllegalStateException("Inventory mutation is not confirmed yet");
     }
 
     @Override
