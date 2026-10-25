@@ -356,6 +356,22 @@ class BotUpdateConfigEntryResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
+class BotDeleteConfigEntryRequest(_message.Message):
+    __slots__ = ("instance_id", "bot_id", "namespace", "key")
+    INSTANCE_ID_FIELD_NUMBER: _ClassVar[int]
+    BOT_ID_FIELD_NUMBER: _ClassVar[int]
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    KEY_FIELD_NUMBER: _ClassVar[int]
+    instance_id: str
+    bot_id: str
+    namespace: str
+    key: str
+    def __init__(self, instance_id: _Optional[str] = ..., bot_id: _Optional[str] = ..., namespace: _Optional[str] = ..., key: _Optional[str] = ...) -> None: ...
+
+class BotDeleteConfigEntryResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
 class BotRenderPovRequest(_message.Message):
     __slots__ = ("instance_id", "bot_id", "width", "height", "max_distance", "fov", "camera_x", "camera_y", "camera_z", "y_rot", "x_rot", "include_hud", "include_hands", "include_debug_trace")
     INSTANCE_ID_FIELD_NUMBER: _ClassVar[int]

@@ -577,6 +577,45 @@ public final class BotServiceImpl extends BotServiceGrpc.BotServiceImplBase {
   }
 
   @Override
+  public void deleteBotConfigEntry(BotDeleteConfigEntryRequest request, StreamObserver<BotDeleteConfigEntryResponse> responseObserver) {
+    var instanceId = UUID.fromString(request.getInstanceId());
+    var botId = UUID.fromString(request.getBotId());
+    ServerRPCConstants.USER_CONTEXT_KEY.get().hasPermissionOrThrow(PermissionContext.instance(InstancePermission.UPDATE_BOT_CONFIG, instanceId));
+
+    try {
+      soulFireServer.dsl().transaction(cfg -> {
+        var ctx = DSL.using(cfg);
+        var record = ctx.selectFrom(Tables.INSTANCES).where(Tables.INSTANCES.ID.eq(instanceId.toString())).fetchOne();
+        if (record == null) {
+          throw Status.NOT_FOUND.withDescription("Instance '%s' not found".formatted(instanceId)).asRuntimeException();
+        }
+
+        var currentSettings = InstanceSettingsImpl.Stem.deserialize(GsonInstance.GSON.fromJson(record.getSettings(), JsonElement.class));
+        if (currentSettings.accounts().stream().noneMatch(account -> account.profileId().equals(botId))) {
+          throw Status.NOT_FOUND.withDescription("Bot '%s' not found".formatted(botId)).asRuntimeException();
+        }
+        var newSettings = currentSettings.withAccounts(currentSettings.accounts().stream()
+          .map(account -> account.profileId().equals(botId)
+            ? account.withSettings(SettingsSource.Stem.withDeletedEntry(account.settings(), request.getNamespace(), request.getKey()))
+            : account)
+          .toList());
+
+        ctx.update(Tables.INSTANCES)
+          .set(Tables.INSTANCES.SETTINGS, GsonInstance.CONFIG_GSON.toJson(newSettings.serializeToTree()))
+          .set(Tables.INSTANCES.UPDATED_AT, LocalDateTime.now(ZoneOffset.UTC))
+          .where(Tables.INSTANCES.ID.eq(instanceId.toString()))
+          .execute();
+      });
+
+      soulFireServer.getInstance(instanceId).ifPresent(InstanceManager::invalidateSettingsCache);
+      responseObserver.onNext(BotDeleteConfigEntryResponse.getDefaultInstance());
+      responseObserver.onCompleted();
+    } catch (Throwable t) {
+      throw GrpcErrors.logAndMap(log, "Error deleting bot config entry", t);
+    }
+  }
+
+  @Override
   public void getBotList(BotListRequest request, StreamObserver<BotListResponse> responseObserver) {
     var instanceId = UUID.fromString(request.getInstanceId());
     ServerRPCConstants.USER_CONTEXT_KEY.get().hasPermissionOrThrow(PermissionContext.instance(InstancePermission.READ_BOT_INFO, instanceId));

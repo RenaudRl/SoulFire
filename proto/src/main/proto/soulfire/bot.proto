@@ -375,6 +375,17 @@ message BotUpdateConfigEntryRequest {
 message BotUpdateConfigEntryResponse {
 }
 
+// Request to remove a bot override and use the inherited setting value.
+message BotDeleteConfigEntryRequest {
+  string instance_id = 1 [(google.api.field_behavior) = REQUIRED, (soulfire.v1.api_field).format = "uuid"];
+  string bot_id = 2 [(google.api.field_behavior) = REQUIRED, (soulfire.v1.api_field).format = "uuid"];
+  string namespace = 3 [(google.api.field_behavior) = REQUIRED];
+  string key = 4 [(google.api.field_behavior) = REQUIRED];
+}
+
+message BotDeleteConfigEntryResponse {
+}
+
 // Request to render the bot's point-of-view as an image.
 // Uses headless Vulkan rendering to generate a PNG image of what the bot sees.
 message BotRenderPovRequest {
@@ -1793,6 +1804,20 @@ service BotService {
       permissions: "UPDATE_BOT_CONFIG"
       scope: "instance.bot"
       side_effects: "Persists the new setting value immediately."
+    };
+  }
+
+  // Removes one bot override without replacing account settings or metadata.
+  // Repeated requests succeed when the override is already absent.
+  rpc DeleteBotConfigEntry (BotDeleteConfigEntryRequest) returns (BotDeleteConfigEntryResponse) {
+    option (google.api.http) = {
+      delete: "/v1/instances/{instance_id}/bots/{bot_id}/config/namespaces/{namespace}/entries/{key}"
+    };
+    option (soulfire.v1.api_method) = {
+      display_name: "Delete bot config entry"
+      permissions: "UPDATE_BOT_CONFIG"
+      scope: "instance.bot"
+      side_effects: "Removes the bot override immediately."
     };
   }
 

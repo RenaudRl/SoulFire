@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .bot_pb2 import BotClickDialogButtonRequest, BotClickDialogButtonResponse, BotCloseContainerRequest, BotCloseContainerResponse, BotCloseDialogRequest, BotCloseDialogResponse, BotContainerButtonClickRequest, BotContainerButtonClickResponse, BotGetDialogRequest, BotGetDialogResponse, BotInfoRequest, BotInfoResponse, BotInventoryClickRequest, BotInventoryClickResponse, BotInventoryStateRequest, BotInventoryStateResponse, BotListRequest, BotListResponse, BotMouseClickRequest, BotMouseClickResponse, BotOpenInventoryRequest, BotOpenInventoryResponse, BotPovFrame, BotRenderPovRequest, BotRenderPovResponse, BotResetMovementRequest, BotResetMovementResponse, BotSetContainerTextRequest, BotSetContainerTextResponse, BotSetHotbarSlotRequest, BotSetHotbarSlotResponse, BotSetMovementStateRequest, BotSetMovementStateResponse, BotSetRotationRequest, BotSetRotationResponse, BotSubmitDialogRequest, BotSubmitDialogResponse, BotUpdateConfigEntryRequest, BotUpdateConfigEntryResponse, BotWatchPovRequest, BotWorldMapRequest, BotWorldMapResponse, RestartBotsRequest, RestartBotsResponse, SetBotsDesiredStateRequest, SetBotsDesiredStateResponse, WatchBotStatusesRequest, WatchBotStatusesResponse
+from .bot_pb2 import BotClickDialogButtonRequest, BotClickDialogButtonResponse, BotCloseContainerRequest, BotCloseContainerResponse, BotCloseDialogRequest, BotCloseDialogResponse, BotContainerButtonClickRequest, BotContainerButtonClickResponse, BotDeleteConfigEntryRequest, BotDeleteConfigEntryResponse, BotGetDialogRequest, BotGetDialogResponse, BotInfoRequest, BotInfoResponse, BotInventoryClickRequest, BotInventoryClickResponse, BotInventoryStateRequest, BotInventoryStateResponse, BotListRequest, BotListResponse, BotMouseClickRequest, BotMouseClickResponse, BotOpenInventoryRequest, BotOpenInventoryResponse, BotPovFrame, BotRenderPovRequest, BotRenderPovResponse, BotResetMovementRequest, BotResetMovementResponse, BotSetContainerTextRequest, BotSetContainerTextResponse, BotSetHotbarSlotRequest, BotSetHotbarSlotResponse, BotSetMovementStateRequest, BotSetMovementStateResponse, BotSetRotationRequest, BotSetRotationResponse, BotSubmitDialogRequest, BotSubmitDialogResponse, BotUpdateConfigEntryRequest, BotUpdateConfigEntryResponse, BotWatchPovRequest, BotWorldMapRequest, BotWorldMapResponse, RestartBotsRequest, RestartBotsResponse, SetBotsDesiredStateRequest, SetBotsDesiredStateResponse, WatchBotStatusesRequest, WatchBotStatusesResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -51,6 +51,9 @@ class BotService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def update_bot_config_entry(self, request: BotUpdateConfigEntryRequest, ctx: RequestContext[BotUpdateConfigEntryRequest, BotUpdateConfigEntryResponse]) -> BotUpdateConfigEntryResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def delete_bot_config_entry(self, request: BotDeleteConfigEntryRequest, ctx: RequestContext[BotDeleteConfigEntryRequest, BotDeleteConfigEntryResponse]) -> BotDeleteConfigEntryResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def render_bot_pov(self, request: BotRenderPovRequest, ctx: RequestContext[BotRenderPovRequest, BotRenderPovResponse]) -> BotRenderPovResponse:
@@ -180,6 +183,16 @@ class BotServiceASGIApplication(ConnectASGIApplication[BotService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.update_bot_config_entry,
+                ),
+                "/soulfire.v1.BotService/DeleteBotConfigEntry": Endpoint.unary(
+                    method=MethodInfo(
+                        name="DeleteBotConfigEntry",
+                        service_name="soulfire.v1.BotService",
+                        input=BotDeleteConfigEntryRequest,
+                        output=BotDeleteConfigEntryResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.delete_bot_config_entry,
                 ),
                 "/soulfire.v1.BotService/RenderBotPov": Endpoint.unary(
                     method=MethodInfo(
@@ -513,6 +526,26 @@ class BotServiceClient(ConnectClient):
                 service_name="soulfire.v1.BotService",
                 input=BotUpdateConfigEntryRequest,
                 output=BotUpdateConfigEntryResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def delete_bot_config_entry(
+        self,
+        request: BotDeleteConfigEntryRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> BotDeleteConfigEntryResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="DeleteBotConfigEntry",
+                service_name="soulfire.v1.BotService",
+                input=BotDeleteConfigEntryRequest,
+                output=BotDeleteConfigEntryResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,
@@ -898,6 +931,9 @@ class BotServiceSync(Protocol):
     def update_bot_config_entry(self, request: BotUpdateConfigEntryRequest, ctx: RequestContext[BotUpdateConfigEntryRequest, BotUpdateConfigEntryResponse]) -> BotUpdateConfigEntryResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def delete_bot_config_entry(self, request: BotDeleteConfigEntryRequest, ctx: RequestContext[BotDeleteConfigEntryRequest, BotDeleteConfigEntryResponse]) -> BotDeleteConfigEntryResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def render_bot_pov(self, request: BotRenderPovRequest, ctx: RequestContext[BotRenderPovRequest, BotRenderPovResponse]) -> BotRenderPovResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -1023,6 +1059,16 @@ class BotServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.update_bot_config_entry,
+                ),
+                "/soulfire.v1.BotService/DeleteBotConfigEntry": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="DeleteBotConfigEntry",
+                        service_name="soulfire.v1.BotService",
+                        input=BotDeleteConfigEntryRequest,
+                        output=BotDeleteConfigEntryResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.delete_bot_config_entry,
                 ),
                 "/soulfire.v1.BotService/RenderBotPov": EndpointSync.unary(
                     method=MethodInfo(
@@ -1351,6 +1397,25 @@ class BotServiceClientSync(ConnectClientSync):
                 service_name="soulfire.v1.BotService",
                 input=BotUpdateConfigEntryRequest,
                 output=BotUpdateConfigEntryResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def delete_bot_config_entry(
+        self,
+        request: BotDeleteConfigEntryRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> BotDeleteConfigEntryResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="DeleteBotConfigEntry",
+                service_name="soulfire.v1.BotService",
+                input=BotDeleteConfigEntryRequest,
+                output=BotDeleteConfigEntryResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,
