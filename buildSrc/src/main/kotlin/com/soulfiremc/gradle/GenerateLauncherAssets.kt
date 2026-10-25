@@ -17,6 +17,7 @@ import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.work.DisableCachingByDefault
 import java.io.File
+import java.io.InputStream
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -26,6 +27,7 @@ import java.time.Duration
 import java.util.HexFormat
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.zip.ZipFile
 
 /// Resolves metadata and download locations at build time. The runtime never resolves repositories.
 @DisableCachingByDefault(because = "Fetches Minecraft metadata and verifies CDN artifacts")
@@ -56,12 +58,7 @@ abstract class GenerateLauncherAssets : DefaultTask() {
       }.associateBy { it["path"].asString }
       val assets = mutableListOf<Map<String, Any>>()
       Executors.newFixedThreadPool(8).use { executor ->
-        val jobs = libraries.files.filter { file ->
-          val coordinate = coordinates.get()[file.name].orEmpty()
-          file.extension == "jar" && !coordinate.startsWith("net.minecraft:") &&
-            !coordinate.startsWith("net.fabricmc:dev-launch-injector:") &&
-            !coordinate.startsWith("net.fabricmc:fabric-log4j-util:")
-        }.sortedBy { it.name }.map { file ->
+        val jobs = runtimeLibraries(libraries.files, coordinates.get()).sortedBy { it.name }.map { file ->
           Callable {
             val coordinate = coordinates.get()[file.name]
             val parts = coordinate?.split(':')
@@ -192,15 +189,40 @@ abstract class GenerateLauncherAssets : DefaultTask() {
   private fun request(url: String) = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofMinutes(3)).build()
 
   companion object {
-    fun digest(file: File, algorithm: String): String {
+    fun runtimeLibraries(files: Set<File>, coordinates: Map<String, String>): List<File> {
+      // Fabric discovers these from the managed mod. Keep transitive dependencies in the
+      // runtime, but do not also ship byte-identical copies of its declared nested JARs.
+      val bundledHashes = files.filter { coordinates[it.name]?.startsWith("com.soulfiremc:mod:") == true }
+        .flatMap { mod ->
+          ZipFile(mod).use { jar ->
+            val metadata = jar.getInputStream(jar.getEntry("fabric.mod.json")).reader().use {
+              JsonParser.parseReader(it).asJsonObject
+            }
+            metadata.getAsJsonArray("jars")?.map { nested ->
+              val path = nested.asJsonObject["file"].asString
+              val entry = requireNotNull(jar.getEntry(path)) { "Missing nested library $path in $mod" }
+              jar.getInputStream(entry).use { digest(it, "SHA-256") }
+            }.orEmpty()
+          }
+        }.toSet()
+      return files.filter { file ->
+        val coordinate = coordinates[file.name].orEmpty()
+        file.extension == "jar" && !coordinate.startsWith("net.minecraft:") &&
+          !coordinate.startsWith("net.fabricmc:dev-launch-injector:") &&
+          !coordinate.startsWith("net.fabricmc:fabric-log4j-util:") &&
+          (bundledHashes.isEmpty() || digest(file, "SHA-256") !in bundledHashes)
+      }
+    }
+
+    fun digest(file: File, algorithm: String): String = file.inputStream().use { digest(it, algorithm) }
+
+    private fun digest(input: InputStream, algorithm: String): String {
       val digest = MessageDigest.getInstance(algorithm)
-      file.inputStream().buffered().use { input ->
-        val buffer = ByteArray(65536)
-        while (true) {
-          val count = input.read(buffer)
-          if (count < 0) break
-          digest.update(buffer, 0, count)
-        }
+      val buffer = ByteArray(65536)
+      while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        digest.update(buffer, 0, count)
       }
       return HexFormat.of().formatHex(digest.digest())
     }
