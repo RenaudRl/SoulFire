@@ -22,7 +22,9 @@ import com.soulfiremc.grpc.generated.BotTaskProgress;
 import com.soulfiremc.grpc.generated.BuildBlock;
 import com.soulfiremc.grpc.generated.BuildBlockStatus;
 import com.soulfiremc.grpc.generated.BuildMaterialSubstitution;
+import com.soulfiremc.grpc.generated.BuildMirror;
 import com.soulfiremc.grpc.generated.BuildOffset;
+import com.soulfiremc.grpc.generated.BuildRotation;
 import com.soulfiremc.grpc.generated.BuildTask;
 import com.soulfiremc.grpc.generated.BuildTaskResult;
 import com.soulfiremc.server.api.BotTaskExecution;
@@ -57,6 +59,8 @@ import net.minecraft.world.phys.BlockHitResult;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockedStatic;
 
@@ -65,12 +69,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -222,6 +228,108 @@ class BuildRecoveryTest {
         ((StatusRuntimeException) failure.getCause()).getStatus().getCode());
       assertEquals(1, fixture.interactions);
     }
+  }
+
+  @ParameterizedTest
+  @MethodSource("unsignedPartitions")
+  void assignsOnlyTheRequestedUnsignedPartition(int count, int index, List<Integer> expected) throws Exception {
+    try (var fixture = new Fixture()) {
+      var input = BuildTask.newBuilder().setOrigin(BlockPosition.newBuilder().setY(64))
+        .setPartitionCount(count).setPartitionIndex(index);
+      for (var x = 0; x < 3; x++) {
+        input.addBlocks(BuildBlock.newBuilder().setBlockId("minecraft:stone")
+          .setOffset(BuildOffset.newBuilder().setX(x)));
+      }
+      var result = fixture.finish(fixture.start(new BuildTaskProvider().prepare(input.build()), 0));
+      assertEquals(expected.size(), result.getBlocksPlaced());
+      assertEquals(0, result.getBlocksFailed());
+      assertEquals(expected, result.getOutcomesList().stream().map(outcome -> outcome.getPosition().getX()).toList());
+      assertEquals(Set.copyOf(expected.stream().map(x -> new BlockPos(x, 64, 0)).toList()), fixture.blocks.keySet());
+    }
+  }
+
+  static Stream<Arguments> unsignedPartitions() {
+    return Stream.of(
+      Arguments.of(2, 0, List.of(0, 2)),
+      Arguments.of(Integer.MIN_VALUE, 0, List.of(0)),
+      Arguments.of(-1, 0, List.of(0)),
+      Arguments.of(Integer.MIN_VALUE, 1, List.of(1)),
+      Arguments.of(-1, -2, List.of())
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource("invalidPartitions")
+  void rejectsUnsignedIndexesOutsideThePartitionCount(int count, int index) {
+    try (var fixture = new Fixture()) {
+      var input = coordinateInput(new BlockPos(0, 64, 0), BlockPos.ZERO,
+        BuildMirror.BUILD_MIRROR_NONE, BuildRotation.BUILD_ROTATION_NONE).toBuilder()
+        .setPartitionCount(count).setPartitionIndex(index).build();
+      var error = assertThrows(StatusRuntimeException.class, () -> fixture.start(new BuildTaskProvider().prepare(input), 0));
+      assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
+      assertEquals(0, fixture.interactions);
+      assertTrue(fixture.blocks.isEmpty());
+    }
+  }
+
+  static Stream<Arguments> invalidPartitions() {
+    return Stream.of(Arguments.of(1, Integer.MIN_VALUE), Arguments.of(-1, -1), Arguments.of(2, 2));
+  }
+
+  @ParameterizedTest
+  @MethodSource("overflowingPositions")
+  void rejectsUnrepresentableTransformedCoordinates(BlockPos origin, BlockPos offset, BuildMirror mirror, BuildRotation rotation) {
+    try (var fixture = new Fixture()) {
+      var input = coordinateInput(origin, offset, mirror, rotation);
+      var error = assertThrows(StatusRuntimeException.class, () -> fixture.start(new BuildTaskProvider().prepare(input), 0));
+      assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
+      assertEquals(0, fixture.interactions);
+      assertTrue(fixture.blocks.isEmpty());
+    }
+  }
+
+  static Stream<Arguments> overflowingPositions() {
+    var none = BuildMirror.BUILD_MIRROR_NONE;
+    var rotation = BuildRotation.BUILD_ROTATION_NONE;
+    var minimum = Integer.MIN_VALUE;
+    var maximum = Integer.MAX_VALUE;
+    return Stream.of(
+      Arguments.of(new BlockPos(minimum, 64, 0), new BlockPos(minimum, 0, 0), none, rotation),
+      Arguments.of(new BlockPos(maximum, 64, 0), new BlockPos(1, 0, 0), none, rotation),
+      Arguments.of(new BlockPos(0, minimum, 0), new BlockPos(0, minimum, 0), none, rotation),
+      Arguments.of(new BlockPos(0, maximum, 0), new BlockPos(0, 1, 0), none, rotation),
+      Arguments.of(new BlockPos(0, 64, minimum), new BlockPos(0, 0, minimum), none, rotation),
+      Arguments.of(new BlockPos(0, 64, maximum), new BlockPos(0, 0, 1), none, rotation),
+      Arguments.of(new BlockPos(1, 64, 0), new BlockPos(minimum, 0, 0), BuildMirror.BUILD_MIRROR_X, rotation),
+      Arguments.of(new BlockPos(1, 64, 0), new BlockPos(0, 0, minimum), none, BuildRotation.BUILD_ROTATION_CLOCKWISE_90)
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource("cancellingTransforms")
+  void preservesRepresentableCoordinatesAfterLargeIntermediateTransforms(BlockPos offset, BuildMirror mirror, BuildRotation rotation) throws Exception {
+    try (var fixture = new Fixture()) {
+      var input = coordinateInput(new BlockPos(Integer.MIN_VALUE, 64, 0), offset, mirror, rotation);
+      var result = fixture.finish(fixture.start(new BuildTaskProvider().prepare(input), 0));
+      assertEquals(1, result.getBlocksPlaced());
+      assertEquals(0, result.getBlocksFailed());
+      assertEquals(Set.of(new BlockPos(0, 64, 0)), fixture.blocks.keySet());
+    }
+  }
+
+  static Stream<Arguments> cancellingTransforms() {
+    return Stream.of(
+      Arguments.of(new BlockPos(Integer.MIN_VALUE, 0, 0), BuildMirror.BUILD_MIRROR_X, BuildRotation.BUILD_ROTATION_NONE),
+      Arguments.of(new BlockPos(0, 0, Integer.MIN_VALUE), BuildMirror.BUILD_MIRROR_NONE, BuildRotation.BUILD_ROTATION_CLOCKWISE_90)
+    );
+  }
+
+  private static BuildTask coordinateInput(BlockPos origin, BlockPos offset, BuildMirror mirror, BuildRotation rotation) {
+    return BuildTask.newBuilder().setOrigin(BlockPosition.newBuilder().setX(origin.getX()).setY(origin.getY()).setZ(origin.getZ()))
+      .setMirror(mirror).setRotation(rotation)
+      .addBlocks(BuildBlock.newBuilder().setBlockId("minecraft:stone")
+        .setOffset(BuildOffset.newBuilder().setX(offset.getX()).setY(offset.getY()).setZ(offset.getZ())))
+      .build();
   }
 
   private static final class Fixture implements AutoCloseable {

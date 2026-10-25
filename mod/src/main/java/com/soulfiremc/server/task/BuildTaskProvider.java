@@ -136,7 +136,18 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
         input.getMirror(),
         input.getRotation()
       );
-      var position = origin.offset(offset.x(), offset.y(), offset.z());
+      BlockPos position;
+      try {
+        position = new BlockPos(
+          Math.toIntExact(origin.getX() + offset.x()),
+          Math.toIntExact(origin.getY() + offset.y()),
+          Math.toIntExact(origin.getZ() + offset.z())
+        );
+      } catch (ArithmeticException _) {
+        throw Status.INVALID_ARGUMENT
+          .withDescription("Build block %d resolves outside the supported coordinate range".formatted(index + 1))
+          .asRuntimeException();
+      }
       if (!occupied.add(position)) {
         throw Status.INVALID_ARGUMENT
           .withDescription(
@@ -164,10 +175,11 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
       .comparingInt((Placement placement) -> placement.position().getY())
       .thenComparingInt(Placement::sourceIndex));
 
-    var partitionCount = Math.max(1, input.getPartitionCount());
+    var partitionCount = Math.max(1, Integer.toUnsignedLong(input.getPartitionCount()));
+    var partitionIndex = Integer.toUnsignedLong(input.getPartitionIndex());
     var selected = new ArrayList<Placement>();
     for (var index = 0; index < transformed.size(); index++) {
-      if (index % partitionCount == input.getPartitionIndex()) {
+      if (index % partitionCount == partitionIndex) {
         selected.add(transformed.get(index));
       }
     }
@@ -218,8 +230,8 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
         )
         .asRuntimeException();
     }
-    var partitionCount = Math.max(1, input.getPartitionCount());
-    if (input.getPartitionIndex() >= partitionCount) {
+    var partitionCount = Math.max(1, Integer.toUnsignedLong(input.getPartitionCount()));
+    if (Integer.toUnsignedLong(input.getPartitionIndex()) >= partitionCount) {
       throw Status.INVALID_ARGUMENT
         .withDescription("partition_index must be smaller than partition_count")
         .asRuntimeException();
@@ -295,9 +307,9 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
   }
 
   private static Offset transformOffset(
-    int x,
-    int y,
-    int z,
+    long x,
+    long y,
+    long z,
     BuildMirror mirror,
     BuildRotation rotation
   ) {
@@ -413,7 +425,7 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
     };
   }
 
-  private record Offset(int x, int y, int z) {
+  private record Offset(long x, long y, long z) {
   }
 
   private record Placement(
