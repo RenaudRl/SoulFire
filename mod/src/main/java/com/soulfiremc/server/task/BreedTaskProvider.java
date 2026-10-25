@@ -119,10 +119,6 @@ public final class BreedTaskProvider implements BotTaskProvider<BreedTask> {
       validateDimension(context, input.getCenter());
       center = toBlockPos(input.getCenter());
     }
-    var player = Objects.requireNonNull(
-      context.bot().minecraft().player,
-      "Bot player is not available"
-    );
     var result = new CompletableFuture<BreedTaskResult>();
     return new BotTaskExecution(
       new BreedControl(
@@ -132,7 +128,6 @@ public final class BreedTaskProvider implements BotTaskProvider<BreedTask> {
         radius,
         rescanInterval,
         breedingTimeout,
-        player.getInventory().getSelectedSlot(),
         PathfindingSupport.buildConstraint(
           context.bot(),
           input.getOptions()
@@ -194,9 +189,10 @@ public final class BreedTaskProvider implements BotTaskProvider<BreedTask> {
     private final int radius;
     private final int rescanIntervalTicks;
     private final int breedingTimeoutTicks;
-    private final int originalSelectedSlot;
     private final PathConstraint constraint;
     private final CompletableFuture<BreedTaskResult> result;
+    private int originalSelectedSlot;
+    private boolean active;
     private final RefusedAnimals refused = new RefusedAnimals();
     private @Nullable Pair pair;
     private @Nullable PathExecutor path;
@@ -215,7 +211,6 @@ public final class BreedTaskProvider implements BotTaskProvider<BreedTask> {
       int radius,
       int rescanIntervalTicks,
       int breedingTimeoutTicks,
-      int originalSelectedSlot,
       PathConstraint constraint,
       CompletableFuture<BreedTaskResult> result
     ) {
@@ -225,7 +220,6 @@ public final class BreedTaskProvider implements BotTaskProvider<BreedTask> {
       this.radius = radius;
       this.rescanIntervalTicks = rescanIntervalTicks;
       this.breedingTimeoutTicks = breedingTimeoutTicks;
-      this.originalSelectedSlot = originalSelectedSlot;
       this.constraint = constraint;
       this.result = result;
     }
@@ -661,7 +655,14 @@ public final class BreedTaskProvider implements BotTaskProvider<BreedTask> {
     }
 
     @Override
+    public void onStarted() {
+      originalSelectedSlot = requirePlayer().getInventory().getSelectedSlot();
+      active = true;
+    }
+
+    @Override
     public void onSuspended() {
+      active = false;
       if (path != null) {
         path.onSuspended();
       }
@@ -669,6 +670,7 @@ public final class BreedTaskProvider implements BotTaskProvider<BreedTask> {
 
     @Override
     public void onResumed() {
+      active = true;
       if (path != null) {
         path.onResumed();
       }
@@ -679,15 +681,21 @@ public final class BreedTaskProvider implements BotTaskProvider<BreedTask> {
       ControlStopReason reason,
       @Nullable Throwable cause
     ) {
-      stopPath(reason, cause);
-      if (input.getRestoreSelectedSlot()) {
-        var player = context.bot().minecraft().player;
-        if (player != null) {
-          player.getInventory().setSelectedSlot(originalSelectedSlot);
+      try {
+        stopPath(reason, cause);
+        if (active) {
+          active = false;
+          if (input.getRestoreSelectedSlot()) {
+            var player = context.bot().minecraft().player;
+            if (player != null) {
+              player.getInventory().setSelectedSlot(originalSelectedSlot);
+            }
+          }
         }
-      }
-      if (reason != ControlStopReason.COMPLETED && !result.isDone()) {
-        result.cancel(true);
+      } finally {
+        if (reason != ControlStopReason.COMPLETED && !result.isDone()) {
+          result.cancel(true);
+        }
       }
     }
 

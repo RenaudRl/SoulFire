@@ -18,6 +18,7 @@
 package com.soulfiremc.server.task;
 
 import com.soulfiremc.grpc.generated.BlockPosition;
+import com.soulfiremc.grpc.generated.BreedTask;
 import com.soulfiremc.grpc.generated.BuildBlock;
 import com.soulfiremc.grpc.generated.BuildTask;
 import com.soulfiremc.grpc.generated.FarmTask;
@@ -101,12 +102,14 @@ class TaskSelectionOwnershipTest {
   }
 
   private enum Provider {
-    FARM, BUILD;
+    FARM, BUILD, BREED;
 
     BotTaskExecution start(BotTaskContext context) {
       return switch (this) {
         case FARM -> new FarmTaskProvider().start(context,
           FarmTask.newBuilder().setRestoreSelectedSlot(true).build());
+        case BREED -> new BreedTaskProvider().start(context,
+          BreedTask.newBuilder().setRestoreSelectedSlot(true).build());
         case BUILD -> new BuildTaskProvider().start(context,
           BuildTask.newBuilder().setOrigin(BlockPosition.getDefaultInstance())
             .addBlocks(BuildBlock.newBuilder().setBlockId("minecraft:stone"))
