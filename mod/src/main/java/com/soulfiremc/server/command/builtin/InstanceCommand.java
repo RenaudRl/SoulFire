@@ -65,7 +65,8 @@ public final class InstanceCommand {
 
     @Override
     public CompletableFuture<Suggestions> getSuggestions(CommandContext<CommandSourceStack> c, SuggestionsBuilder b) {
-      c.getSource().getVisibleInstances().forEach(instance -> b.suggest(instance.friendlyName()));
+      c.getSource().getVisibleInstances().forEach(instance ->
+        b.suggest(StringArgumentType.escapeIfRequired(instance.friendlyName())));
 
       return b.buildFuture();
     }
