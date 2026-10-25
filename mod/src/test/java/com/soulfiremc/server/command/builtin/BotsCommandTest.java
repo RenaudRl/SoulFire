@@ -122,6 +122,27 @@ class BotsCommandTest {
       suggestions.getList().stream().map(suggestion -> suggestion.getText()).collect(Collectors.toSet()));
   }
 
+  @ParameterizedTest
+  @MethodSource("nestedScopes")
+  void nestedSelectorsPreserveTheOriginalLimits(BotDesiredState desired, String prefix, Set<UUID> expected) throws Exception {
+    var fixture = new Fixture();
+    var result = fixture.dispatcher.execute(prefix + " " + command(desired), fixture.source(null));
+    assertEquals(expected.isEmpty() ? 0 : 1, result);
+    fixture.verifyTargets(fixture.controller, expected, desired);
+    verifyNoInteractions(fixture.otherController);
+  }
+
+  static Stream<Arguments> nestedScopes() {
+    return states().flatMap(state -> Stream.of(
+      Arguments.of(state, "bot \"E2EBot,FleetE2EA\" bot E2EBot", Set.of(FIRST)),
+      Arguments.of(state, "bot E2EBot bot \"E2EBot,FleetE2EA\"", Set.of(FIRST)),
+      Arguments.of(state, "bot E2EBot bot MissingQABot", Set.of()),
+      Arguments.of(state, "instance \"Command QA,Command QA\"", Set.of(FIRST, SECOND)),
+      Arguments.of(state, "instance \"Missing QA\"", Set.of()),
+      Arguments.of(state, "instance \"Missing QA\" instance \"Command QA\"", Set.of())
+    ));
+  }
+
   private static Stream<BotDesiredState> states() {
     return Stream.of(BotDesiredState.BOT_DESIRED_STATE_RUNNING, BotDesiredState.BOT_DESIRED_STATE_STOPPED);
   }
@@ -148,6 +169,7 @@ class BotsCommandTest {
       when(server.instances()).thenReturn(Map.of(instanceId, instance, otherId, other));
       BotsCommand.register(dispatcher);
       BotCommand.register(dispatcher);
+      InstanceCommand.register(dispatcher);
     }
 
     CommandSourceStack source(Set<UUID> botIds) {

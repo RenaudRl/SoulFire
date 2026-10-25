@@ -30,6 +30,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 public record CommandSourceStack(
   SoulFireServer soulFire,
@@ -54,27 +55,25 @@ public record CommandSourceStack(
   }
 
   public CommandSourceStack withInstanceIds(Set<UUID> instanceIds) {
-    if (Objects.equals(this.instanceIds, instanceIds)) {
+    var restricted = restrictIds(this.instanceIds, instanceIds);
+    if (Objects.equals(this.instanceIds, restricted)) {
       return this;
     }
-
-    if (this.instanceIds != null) {
-      throw new IllegalStateException("Instance IDs already set");
-    }
-
-    return new CommandSourceStack(soulFire, source, instanceIds, botIds);
+    return new CommandSourceStack(soulFire, source, restricted, botIds);
   }
 
   public CommandSourceStack withBotIds(Set<UUID> botIds) {
-    if (Objects.equals(this.botIds, botIds)) {
+    var restricted = restrictIds(this.botIds, botIds);
+    if (Objects.equals(this.botIds, restricted)) {
       return this;
     }
+    return new CommandSourceStack(soulFire, source, instanceIds, restricted);
+  }
 
-    if (this.botIds != null) {
-      throw new IllegalStateException("Bot names already set");
-    }
-
-    return new CommandSourceStack(soulFire, source, instanceIds, botIds);
+  private static Set<UUID> restrictIds(@Nullable Set<UUID> current, Set<UUID> requested) {
+    return requested.stream()
+      .filter(id -> current == null || current.contains(id))
+      .collect(Collectors.toUnmodifiableSet());
   }
 
   public List<InstanceManager> getVisibleInstances() {

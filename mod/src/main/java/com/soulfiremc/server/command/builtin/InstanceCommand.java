@@ -26,6 +26,7 @@ import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import com.soulfiremc.server.InstanceManager;
 import com.soulfiremc.server.command.CommandSourceStack;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -47,7 +48,7 @@ public final class InstanceCommand {
               helpSingleRedirect(
                 "Run a command for specific instances. Separate instance names with commas.",
                 c -> {
-                  var instanceNames = Set.of(StringArgumentType.getString(c, "instance_names").split(","));
+                  var instanceNames = Set.copyOf(List.of(StringArgumentType.getString(c, "instance_names").split(",")));
                   return c.getSource()
                     .withInstanceIds(c.getSource().getVisibleInstances()
                       .stream()
