@@ -300,16 +300,6 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
         return;
       }
       try {
-        if (
-          maximumHarvests > 0
-            && cropsHarvested >= maximumHarvests
-        ) {
-          complete(
-            FarmCompletionReason
-              .FARM_COMPLETION_REASON_HARVEST_LIMIT_REACHED
-          );
-          return;
-        }
         switch (stage) {
           case SCAN -> scan();
           case WAIT_TO_RESCAN -> waitToRescan();
@@ -327,6 +317,16 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
     }
 
     private void scan() {
+      if (
+        maximumHarvests > 0
+          && cropsHarvested >= maximumHarvests
+      ) {
+        complete(
+          FarmCompletionReason
+            .FARM_COMPLETION_REASON_HARVEST_LIMIT_REACHED
+        );
+        return;
+      }
       target = findNearestMatureCrop();
       if (target == null) {
         if (completeWhenNoMatureCrops) {
