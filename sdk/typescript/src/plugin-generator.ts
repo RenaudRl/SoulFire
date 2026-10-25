@@ -1,4 +1,5 @@
 import { fromBinary } from "@bufbuild/protobuf";
+import { safeObjectProperty } from "@bufbuild/protobuf/reflect";
 import {
   FileDescriptorSetSchema,
   type FileDescriptorProto,
@@ -26,6 +27,43 @@ import type { PluginApiDescriptor } from "./generated/soulfire/plugin_api_pb.js"
 
 const executeFile = promisify(execFile);
 const require = createRequire(import.meta.url);
+const PYTHON_KEYWORDS = new Set([
+  "False",
+  "None",
+  "True",
+  "and",
+  "as",
+  "assert",
+  "async",
+  "await",
+  "break",
+  "class",
+  "continue",
+  "def",
+  "del",
+  "elif",
+  "else",
+  "except",
+  "finally",
+  "for",
+  "from",
+  "global",
+  "if",
+  "import",
+  "in",
+  "is",
+  "lambda",
+  "nonlocal",
+  "not",
+  "or",
+  "pass",
+  "raise",
+  "return",
+  "try",
+  "while",
+  "with",
+  "yield",
+]);
 
 export type PluginSdkLanguage = "typescript" | "python";
 
@@ -311,13 +349,13 @@ function serviceModels(
         {
           name: service.name,
           fullName,
-          localName: lowerCamel(service.name),
-          pythonName: snakeCase(service.name),
+          localName: safeObjectProperty(lowerCamel(service.name)),
+          pythonName: pythonMemberName(snakeCase(service.name)),
           fileName: file.name,
           methods: service.method.map((method) => ({
             name: method.name,
-            localName: lowerCamel(method.name),
-            pythonName: snakeCase(method.name),
+            localName: safeObjectProperty(lowerCamel(method.name)),
+            pythonName: pythonMemberName(snakeCase(method.name)),
             inputType: requirePythonType(messageTypes, method.inputType),
             outputType: requirePythonType(messageTypes, method.outputType),
             serverStreaming: method.serverStreaming,
@@ -387,8 +425,8 @@ function taskModels(
       inputTypeUrl: task.inputTypeUrl,
       resultTypeUrl: task.resultTypeUrl,
       ...(task.progressTypeUrl === undefined ? {} : { progressTypeUrl: task.progressTypeUrl }),
-      localName: lowerCamel(methodName),
-      pythonName: snakeCase(methodName),
+      localName: safeObjectProperty(lowerCamel(methodName)),
+      pythonName: pythonMemberName(snakeCase(methodName)),
       inputType,
       resultType,
       ...(progressType === undefined ? {} : { progressType }),
@@ -1264,6 +1302,10 @@ function nextMinorVersion(version: string): string {
     throw new Error(`Invalid SoulFire SDK version: ${version}`);
   }
   return `${major}.${minor + 1}`;
+}
+
+function pythonMemberName(value: string): string {
+  return PYTHON_KEYWORDS.has(value) ? `${value}_` : value;
 }
 
 function pythonIdentifier(value: string): string {
