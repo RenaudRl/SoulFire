@@ -49,6 +49,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -72,6 +73,52 @@ final class FarmTaskProviderTest {
   @BeforeAll
   static void bootstrapMinecraft() {
     TestBootstrap.bootstrapForTest();
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {Integer.MIN_VALUE, Integer.MIN_VALUE + 1, -1})
+  void capsLargeUnsignedRadiiWithoutLosingMatureCrops(int radius) {
+    var fixture = new Fixture();
+    fixture.minimumY = 64;
+    fixture.maximumY = 64;
+    var execution = fixture.start(new FarmTaskProvider().prepare(FarmTask.newBuilder()
+      .setCenter(BlockPosition.newBuilder().setY(64))
+      .setRadius(radius).setMaximumHarvests(1)
+      .setCompleteWhenNoMatureCrops(true).build()));
+    fixture.tickUntil(execution, () -> execution.result().isDone());
+    assertEquals(1, ((FarmTaskResult) execution.result().join()).getCropsHarvested());
+    assertEquals(1, fixture.harvests);
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {Integer.MAX_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE + 1, -1})
+  void retainsLargeUnsignedHarvestLimitsInProgress(int maximumHarvests) {
+    var fixture = new Fixture();
+    var execution = fixture.start(fixture.factory(maximumHarvests));
+    fixture.tickUntil(execution, () -> execution.result().isDone());
+    assertEquals(4, ((FarmTaskResult) execution.result().join()).getCropsHarvested());
+    assertEquals(4, fixture.progress.getCurrent());
+    assertEquals(Integer.toUnsignedLong(maximumHarvests), fixture.progress.getTotal());
+  }
+
+  @ParameterizedTest
+  @CsvSource({"0,100", "4,4", "2147483647,72000", "-2147483648,72000", "-1,72000"})
+  void boundsUnsignedRescanDelaysWithoutPollingEarly(int interval, int expectedTicks) {
+    var fixture = new Fixture();
+    var mature = Map.copyOf(fixture.blocks);
+    fixture.blocks.clear();
+    var execution = fixture.start(new FarmTaskProvider().prepare(FarmTask.newBuilder()
+      .setCenter(BlockPosition.newBuilder().setY(64))
+      .setRadius(4).setMaximumHarvests(1).setRescanIntervalTicks(interval).build()));
+    execution.control().tick();
+    fixture.blocks.putAll(mature);
+    for (var tick = 0; tick < expectedTicks - 1; tick++) {
+      execution.control().tick();
+    }
+    assertEquals(0, fixture.harvests);
+    assertFalse(execution.result().isDone());
+    fixture.tickUntil(execution, () -> execution.result().isDone());
+    assertEquals(1, fixture.harvests);
   }
 
   @Test
@@ -199,6 +246,8 @@ final class FarmTaskProviderTest {
     int harvests;
     boolean loaded = true;
     boolean nether;
+    int minimumY = -64;
+    int maximumY = 320;
 
     Fixture() {
       for (var x = 0; x < 4; x++) {
@@ -238,8 +287,8 @@ final class FarmTaskProviderTest {
       when(player.getMainHandItem()).thenReturn(held);
       when(player.getItemInHand(InteractionHand.MAIN_HAND)).thenReturn(held);
       when(level.dimension()).thenReturn(nether ? Level.NETHER : Level.OVERWORLD);
-      when(level.getMinY()).thenReturn(-64);
-      when(level.getMaxY()).thenReturn(320);
+      when(level.getMinY()).thenReturn(minimumY);
+      when(level.getMaxY()).thenReturn(maximumY);
       when(level.getChunkSource()).thenReturn(chunks);
       when(chunks.hasChunk(anyInt(), anyInt())).thenAnswer(_ -> loaded);
       when(level.getBlockState(any())).thenAnswer(call ->

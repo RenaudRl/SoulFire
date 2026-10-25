@@ -102,7 +102,7 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
   public String summary(FarmTask input) {
     return input.getMaximumHarvests() == 0
       ? "Farm mature crops until cancelled"
-      : "Harvest up to " + input.getMaximumHarvests() + " mature crops";
+      : "Harvest up to " + Integer.toUnsignedLong(input.getMaximumHarvests()) + " mature crops";
   }
 
   @Override
@@ -124,11 +124,11 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
   private BotTaskExecution start(BotTaskContext context, FarmTask input, RecoveryState recovery) {
     var radius = input.getRadius() == 0
       ? DEFAULT_RADIUS
-      : Math.min(input.getRadius(), MAX_RADIUS);
+      : (int) Math.min(Integer.toUnsignedLong(input.getRadius()), MAX_RADIUS);
     var rescanInterval = input.getRescanIntervalTicks() == 0
       ? DEFAULT_RESCAN_INTERVAL_TICKS
-      : Math.min(
-        input.getRescanIntervalTicks(),
+      : (int) Math.min(
+        Integer.toUnsignedLong(input.getRescanIntervalTicks()),
         MAX_RESCAN_INTERVAL_TICKS
       );
     var selectedCropIds = normalizeCropIds(input.getCropIdsList());
@@ -144,7 +144,7 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
         selectedCropIds,
         center,
         radius,
-        input.getMaximumHarvests(),
+        Integer.toUnsignedLong(input.getMaximumHarvests()),
         input.getReplant(),
         input.getCompleteWhenNoMatureCrops(),
         rescanInterval,
@@ -261,7 +261,7 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
     private final Set<String> cropIds;
     private final @Nullable BlockPos fixedCenter;
     private final int radius;
-    private final int maximumHarvests;
+    private final long maximumHarvests;
     private final boolean replant;
     private final boolean completeWhenNoMatureCrops;
     private final int rescanIntervalTicks;
@@ -281,7 +281,7 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
       Set<String> cropIds,
       @Nullable BlockPos fixedCenter,
       int radius,
-      int maximumHarvests,
+      long maximumHarvests,
       boolean replant,
       boolean completeWhenNoMatureCrops,
       int rescanIntervalTicks,
@@ -335,7 +335,7 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
     private void scan() {
       if (
         maximumHarvests > 0
-          && recovery.cropsHarvested >= maximumHarvests
+          && Integer.toUnsignedLong(recovery.cropsHarvested) >= maximumHarvests
       ) {
         complete(
           FarmCompletionReason
@@ -873,13 +873,13 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
     private void report(String message) {
       var builder = BotTaskProgress.newBuilder()
         .setMessage(message)
-        .setCurrent(recovery.cropsHarvested);
+        .setCurrent(Integer.toUnsignedLong(recovery.cropsHarvested));
       if (maximumHarvests > 0) {
         builder
           .setTotal(maximumHarvests)
           .setFraction(Math.min(
             1.0,
-            (double) recovery.cropsHarvested / maximumHarvests
+            (double) Integer.toUnsignedLong(recovery.cropsHarvested) / maximumHarvests
           ));
       }
       context.reportProgress(builder.build());
