@@ -19,19 +19,35 @@ package com.soulfiremc.server.grpc;
 
 import com.google.protobuf.Any;
 import com.google.protobuf.util.Timestamps;
-import com.soulfiremc.grpc.generated.*;
+import com.soulfiremc.grpc.generated.GetPluginApiRequest;
+import com.soulfiremc.grpc.generated.GetPluginApiResponse;
+import com.soulfiremc.grpc.generated.GetPluginDescriptorSetRequest;
+import com.soulfiremc.grpc.generated.GetPluginDescriptorSetResponse;
+import com.soulfiremc.grpc.generated.GlobalPermission;
+import com.soulfiremc.grpc.generated.ListPluginApisRequest;
+import com.soulfiremc.grpc.generated.ListPluginApisResponse;
+import com.soulfiremc.grpc.generated.PluginApiEvent;
+import com.soulfiremc.grpc.generated.PluginApiEventKind;
+import com.soulfiremc.grpc.generated.PluginApiServiceGrpc;
+import com.soulfiremc.grpc.generated.PluginEvent;
+import com.soulfiremc.grpc.generated.PluginEventKind;
+import com.soulfiremc.grpc.generated.WatchPluginApisRequest;
+import com.soulfiremc.grpc.generated.WatchPluginEventsRequest;
 import com.soulfiremc.server.api.PluginApiDefinition;
 import com.soulfiremc.server.api.PluginApiRegistry;
+import com.soulfiremc.server.api.PluginEventRegistration;
 import com.soulfiremc.server.api.PluginEventTarget;
 import com.soulfiremc.server.api.PublishedPluginEvent;
 import com.soulfiremc.server.user.PermissionContext;
+import com.soulfiremc.server.user.SoulFireUser;
 import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 
-import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.ArrayDeque;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
 /// Exposes plugin API metadata and descriptor sets to authenticated SDKs.
@@ -128,69 +144,153 @@ public final class PluginApiServiceImpl extends PluginApiServiceGrpc.PluginApiSe
       throw Status.INTERNAL.withDescription("Server stream cancellation is unavailable")
         .asRuntimeException();
     }
-    var user = ServerRPCConstants.USER_CONTEXT_KEY.get();
-    var filter = EventFilter.from(request);
-    var closed = new AtomicBoolean();
-    var readyDelivered = new AtomicBoolean();
-    var dropped = new AtomicLong();
-    var subscription = new AtomicReference<AutoCloseable>();
+    var subscription = new EventSubscription(observer, ServerRPCConstants.USER_CONTEXT_KEY.get(), EventFilter.from(request));
+    observer.setOnReadyHandler(subscription::drain);
+    observer.setOnCancelHandler(subscription::close);
+    subscription.start(registry.subscribeEvents(subscription::accept), request.getAfterSequence());
+  }
 
-    var registered = registry.subscribeEvents(event -> {
-      if (
-        closed.get()
-        || observer.isCancelled()
-        || !filter.matches(event)
-        || !authorized(user, event)
-      ) {
+  private static final class EventSubscription {
+    private static final int MAX_PENDING_EVENTS = 256;
+    private static final int MAX_PENDING_BYTES = 1024 * 1024;
+
+    private final ServerCallStreamObserver<PluginEvent> observer;
+    private final SoulFireUser user;
+    private final EventFilter filter;
+    private final ArrayDeque<PendingEvent> pending = new ArrayDeque<>();
+    private AutoCloseable listener;
+    private PluginEvent ready;
+    private boolean readyDelivered;
+    private boolean draining;
+    private boolean closed;
+    private int pendingBytes;
+    private long droppedAfterQueue;
+
+    private EventSubscription(ServerCallStreamObserver<PluginEvent> observer, SoulFireUser user, EventFilter filter) {
+      this.observer = observer;
+      this.user = user;
+      this.filter = filter;
+    }
+
+    synchronized void start(PluginApiRegistry.EventSubscription registered, long afterSequence) {
+      if (closed) {
+        PluginApiServiceImpl.close(registered.closeable());
         return;
       }
-      if (!readyDelivered.get() || !observer.isReady()) {
-        dropped.incrementAndGet();
+      listener = registered.closeable();
+      ready = PluginEvent.newBuilder()
+        .setSequence(registered.sequence())
+        .setEmittedAt(Timestamps.fromMillis(System.currentTimeMillis()))
+        .setKind(PluginEventKind.PLUGIN_EVENT_KIND_READY)
+        .setScope(com.soulfiremc.grpc.generated.PluginEventScope.getDefaultInstance())
+        .setResumeGap(afterSequence > 0 && afterSequence != registered.sequence())
+        .build();
+      drain();
+    }
+
+    synchronized void accept(PublishedPluginEvent event) {
+      if (closed || observer.isCancelled() || !filter.matches(event) || !authorized(user, event)) return;
+      try {
+        if (!draining && readyDelivered && pending.isEmpty() && observer.isReady()) {
+          // A ready transport can accept a large event without retaining it in our queue.
+          draining = true;
+          try {
+            var skipped = droppedAfterQueue;
+            droppedAfterQueue = 0;
+            observer.onNext(pluginEvent(event, skipped));
+          } finally {
+            draining = false;
+          }
+        } else {
+          enqueue(event);
+        }
+        drain();
+      } catch (Throwable throwable) {
+        close();
+      }
+    }
+
+    private void enqueue(PublishedPluginEvent event) {
+      if (event.payload().getSerializedSize() > MAX_PENDING_BYTES) {
+        droppedAfterQueue++;
         return;
       }
-      synchronized (observer) {
-        if (closed.get() || observer.isCancelled() || !observer.isReady()) {
-          dropped.incrementAndGet();
+      var message = pluginEvent(event, 0);
+      var bytes = message.getSerializedSize();
+      if (bytes > MAX_PENDING_BYTES) {
+        droppedAfterQueue++;
+        return;
+      }
+      while (pending.size() >= MAX_PENDING_EVENTS || pendingBytes + bytes > MAX_PENDING_BYTES) {
+        var evicted = pending.removeFirst();
+        pendingBytes -= evicted.message.getSerializedSize();
+        var skipped = evicted.droppedBefore + 1;
+        if (pending.isEmpty()) droppedAfterQueue += skipped;
+        else pending.getFirst().droppedBefore += skipped;
+      }
+      pending.addLast(new PendingEvent(event, message, droppedAfterQueue));
+      pendingBytes += bytes;
+      droppedAfterQueue = 0;
+    }
+
+    synchronized void drain() {
+      if (closed || draining) return;
+      draining = true;
+      try {
+        if (observer.isCancelled()) {
+          close();
           return;
         }
-        try {
-          observer.onNext(pluginEvent(event, dropped.getAndSet(0)));
-        } catch (Throwable throwable) {
-          closed.set(true);
+        if (!readyDelivered && ready != null && observer.isReady()) {
+          var snapshot = ready;
+          ready = null;
+          readyDelivered = true;
+          observer.onNext(snapshot);
         }
+        while (!closed && readyDelivered && !pending.isEmpty() && observer.isReady()) {
+          if (observer.isCancelled()) {
+            close();
+            return;
+          }
+          var event = pending.removeFirst();
+          pendingBytes -= event.message.getSerializedSize();
+          if (authorized(user, event.registration, event.target)) {
+            observer.onNext(event.droppedBefore == 0
+              ? event.message
+              : event.message.toBuilder().setDroppedBefore(event.droppedBefore).build());
+          }
+        }
+      } catch (Throwable throwable) {
+        close();
+      } finally {
+        draining = false;
       }
-    });
-    subscription.set(registered.closeable());
+    }
 
-    var sendReady = (Runnable) () -> {
-      if (
-        closed.get()
-        || observer.isCancelled()
-        || !observer.isReady()
-        || !readyDelivered.compareAndSet(false, true)
-      ) {
-        return;
+    synchronized void close() {
+      if (closed) return;
+      closed = true;
+      pending.clear();
+      pendingBytes = 0;
+      ready = null;
+      var registered = listener;
+      listener = null;
+      PluginApiServiceImpl.close(registered);
+    }
+
+    private static final class PendingEvent {
+      private final PluginEventRegistration<?> registration;
+      private final PluginEventTarget target;
+      private final PluginEvent message;
+      private long droppedBefore;
+
+      private PendingEvent(PublishedPluginEvent source, PluginEvent message, long droppedBefore) {
+        this.registration = source.registration();
+        this.target = source.target();
+        this.message = message;
+        this.droppedBefore = droppedBefore;
       }
-      synchronized (observer) {
-        observer.onNext(PluginEvent.newBuilder()
-          .setSequence(registered.sequence())
-          .setEmittedAt(Timestamps.fromMillis(System.currentTimeMillis()))
-          .setKind(PluginEventKind.PLUGIN_EVENT_KIND_READY)
-          .setScope(com.soulfiremc.grpc.generated.PluginEventScope.getDefaultInstance())
-          .setDroppedBefore(dropped.getAndSet(0))
-          .setResumeGap(
-            request.getAfterSequence() > 0
-              && request.getAfterSequence() != registered.sequence()
-          )
-          .build());
-      }
-    };
-    observer.setOnReadyHandler(sendReady);
-    observer.setOnCancelHandler(() -> {
-      closed.set(true);
-      close(subscription.getAndSet(null));
-    });
-    sendReady.run();
+    }
   }
 
   private static PluginEvent pluginEvent(PublishedPluginEvent event, long droppedBefore) {
@@ -220,8 +320,15 @@ public final class PluginApiServiceImpl extends PluginApiServiceGrpc.PluginApiSe
     com.soulfiremc.server.user.SoulFireUser user,
     PublishedPluginEvent event
   ) {
-    var target = event.target();
-    return event.registration().permissions().stream().allMatch(permission ->
+    return authorized(user, event.registration(), event.target());
+  }
+
+  private static boolean authorized(
+    SoulFireUser user,
+    PluginEventRegistration<?> registration,
+    PluginEventTarget target
+  ) {
+    return registration.permissions().stream().allMatch(permission ->
       user.hasPermission(PermissionContext.plugin(
         permission,
         target.instanceId(),
