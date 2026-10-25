@@ -32,6 +32,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /// Multiplexes the complete per-bot event contract onto one instance stream.
@@ -65,6 +66,7 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
     var parent = (ServerCallStreamObserver<InstanceEvent>) responseObserver;
     var closed = new AtomicBoolean(false);
     var children = new ConcurrentHashMap<UUID, MultiplexingObserver>();
+    var readySignals = new AtomicInteger();
     var selectedBotIds = parseBotIds(request.getFilter().getBotIdsList());
     var botFilter = botFilter(request.getFilter());
     var legacyEnvelope = !request.getFilter().hasBotEvents();
@@ -107,7 +109,25 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
     };
 
     try {
-      parent.setOnReadyHandler(() -> children.values().forEach(MultiplexingObserver::notifyReady));
+      parent.setOnReadyHandler(() -> {
+        if (closed.get() || parent.isCancelled() || readySignals.getAndIncrement() != 0) return;
+        // A transport may invoke onReady inside onNext while the parent monitor is held.
+        // Fan out asynchronously so a write never acquires another child's monitor.
+        soulFireServer.scheduler().schedule(() -> {
+          var pending = readySignals.get();
+          try {
+            do {
+              if (!closed.get() && !parent.isCancelled()) {
+                children.values().forEach(MultiplexingObserver::notifyReady);
+              }
+              pending = readySignals.addAndGet(-pending);
+            } while (pending != 0);
+          } catch (RuntimeException | Error error) {
+            subscription.fail(Status.INTERNAL.withDescription("Failed to resume bot event streams").withCause(error));
+            throw error;
+          }
+        });
+      });
       parent.setOnCancelHandler(subscription::close);
       if (!subscription.start()) return;
       synchronized (children) {

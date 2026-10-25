@@ -26,6 +26,7 @@ import com.soulfiremc.grpc.generated.WatchBotEventsRequest;
 import com.soulfiremc.grpc.generated.WatchInstanceEventsRequest;
 import com.soulfiremc.server.BotStateManager;
 import com.soulfiremc.server.InstanceManager;
+import com.soulfiremc.server.SoulFireScheduler;
 import com.soulfiremc.server.SoulFireServer;
 import com.soulfiremc.server.account.AuthType;
 import com.soulfiremc.server.account.MinecraftAccount;
@@ -69,6 +70,7 @@ import static org.mockito.Mockito.when;
 final class InstanceLiveServiceTest {
   private final UUID instanceId = UUID.randomUUID();
   private final SoulFireServer server = mock();
+  private final SoulFireScheduler scheduler = mock();
   private final SoulFireUser user = mock();
   private final AuthSystem auth = mock();
   private final UUID owner = UUID.randomUUID();
@@ -83,11 +85,16 @@ final class InstanceLiveServiceTest {
   private final List<InstanceEvent> received = new ArrayList<>();
   private final AtomicInteger subscriptions = new AtomicInteger();
   private final AtomicInteger cancellations = new AtomicInteger();
+  private final List<Runnable> scheduled = new ArrayList<>();
+  private Runnable readyParent;
   private Runnable cancelParent;
 
   @BeforeEach
   void setUp() {
     when(server.authSystem()).thenReturn(auth);
+    when(server.scheduler()).thenReturn(scheduler);
+    doAnswer(call -> { scheduled.add(call.getArgument(0)); return null; })
+      .when(scheduler).schedule(any(Runnable.class));
     when(user.getUniqueId()).thenReturn(owner);
     when(user.getIssuedAt()).thenReturn(issuedAt);
     when(user.hasPermission(any())).thenReturn(true);
@@ -103,6 +110,8 @@ final class InstanceLiveServiceTest {
       return (Runnable) () -> listeners.remove(listener);
     });
     when(parent.isReady()).thenReturn(true);
+    doAnswer(call -> { readyParent = call.getArgument(0); return null; })
+      .when(parent).setOnReadyHandler(any());
     doAnswer(invocation -> {
       cancelParent = invocation.getArgument(0);
       return null;
@@ -124,6 +133,67 @@ final class InstanceLiveServiceTest {
   @AfterEach
   void tearDown() {
     if (cancelParent != null) cancelParent.run();
+  }
+
+  @Test
+  void inlineTransportReadinessDoesNotAcquireAnotherChildWhileHoldingTheParent() {
+    for (var account : List.of(account(), account())) accounts.put(account.profileId(), account);
+    watch(InstanceEventFilter.getDefaultInstance());
+    var notifications = new AtomicInteger();
+    children.values().forEach(child -> child.setOnReadyHandler(() -> {
+      assertFalse(Thread.holdsLock(parent));
+      synchronized (child) { notifications.incrementAndGet(); }
+    }));
+    synchronized (parent) {
+      readyParent.run();
+      readyParent.run();
+      assertEquals(0, notifications.get());
+    }
+    assertEquals(1, scheduled.size());
+    scheduled.removeFirst().run();
+    assertEquals(2, notifications.get());
+  }
+
+  @Test
+  void readinessDuringFanoutIsDrainedWithoutSchedulingAnotherWorker() {
+    var account = account();
+    accounts.put(account.profileId(), account);
+    watch(InstanceEventFilter.getDefaultInstance());
+    var notifications = new AtomicInteger();
+    children.get(account.profileId()).setOnReadyHandler(() -> {
+      if (notifications.incrementAndGet() == 1) readyParent.run();
+    });
+    readyParent.run();
+    scheduled.removeFirst().run();
+    assertEquals(2, notifications.get());
+    assertTrue(scheduled.isEmpty());
+  }
+
+  @Test
+  void cancelledStreamDiscardsScheduledReadiness() {
+    var account = account();
+    accounts.put(account.profileId(), account);
+    watch(InstanceEventFilter.getDefaultInstance());
+    var notifications = new AtomicInteger();
+    children.get(account.profileId()).setOnReadyHandler(notifications::incrementAndGet);
+    readyParent.run();
+    cancelParent.run();
+    scheduled.removeFirst().run();
+    assertEquals(0, notifications.get());
+    readyParent.run();
+    assertTrue(scheduled.isEmpty());
+  }
+
+  @Test
+  void failedReadinessClosesTheParentAndReleasesEveryChild() {
+    for (var account : List.of(account(), account())) accounts.put(account.profileId(), account);
+    watch(InstanceEventFilter.getDefaultInstance());
+    children.values().forEach(child -> child.setOnReadyHandler(() -> { throw new IllegalStateException(); }));
+    readyParent.run();
+    assertThrows(IllegalStateException.class, () -> scheduled.removeFirst().run());
+    assertEquals(2, cancellations.get());
+    assertTrue(listeners.isEmpty());
+    verify(parent).onError(argThat(error -> Status.fromThrowable(error).getCode() == Status.Code.INTERNAL));
   }
 
   @Test

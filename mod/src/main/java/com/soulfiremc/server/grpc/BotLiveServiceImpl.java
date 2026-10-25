@@ -415,19 +415,26 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
     var lastInventory = new AtomicReference<BotInventoryStateResponse>(null);
     var lastEntities = new AtomicReference<Map<Integer, ObservedEntity>>(Map.of());
     var lastEntityScan = new AtomicLong();
+    var auxiliarySnapshotsPending = new AtomicBoolean();
     var spawnedConnection = new AtomicReference<BotConnection>(null);
     var deaths = new BotDeathTracker();
     serverObserver.setOnReadyHandler(() -> {
-      if (!eventContext.consumeDropped()) {
+      if (closed.get() || serverObserver.isCancelled() || !eventContext.consumeDropped()) {
         return;
       }
-      lastState.set(null);
-      lastInventory.set(null);
-      lastEntities.set(Map.of());
-      emitBotEvent(serverObserver, closed, BotEvent.newBuilder()
-        .setResyncRequired(BotResyncRequired.newBuilder()
-          .setReason("Events were dropped because the consumer could not keep up"))
-        .build());
+      var status = instance.botStateManager().status(botId);
+      synchronized (serverObserver) {
+        lastState.set(null);
+        lastInventory.set(null);
+        lastEntities.set(Map.of());
+        emitBotEvent(serverObserver, closed, BotEvent.newBuilder()
+          .setResyncRequired(BotResyncRequired.newBuilder()
+            .setReason("Events were dropped because the consumer could not keep up"))
+          .build());
+        emitBotEvent(serverObserver, closed, BotEvent.newBuilder().setStatus(status).build());
+        // The game tick replays client data only after the resync marker has been sent.
+        auxiliarySnapshotsPending.set(true);
+      }
     });
 
     if (request.getAfterSequence() > 0 || request.hasStreamEpoch()) {
@@ -502,6 +509,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
       lastInventory.set(null);
       lastEntities.set(Map.of());
       spawnedConnection.set(null);
+      auxiliarySnapshotsPending.set(true);
       deaths.reset();
       eventContext.newEpoch();
       if (filter.getIncludeLifecycle()) {
@@ -527,7 +535,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
 
     Consumer<BotPostTickEvent> stateListener = event -> {
       var connection = event.connection();
-      if (!matches(connection, instance, botId)) {
+      if (closed.get() || !matches(connection, instance, botId)) {
         return;
       }
       emitCurrentSnapshot(
@@ -539,6 +547,13 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
         lastInventory,
         spawnedConnection,
         deaths);
+      var minecraft = connection.minecraft();
+      if (auxiliarySnapshotsPending.get()
+        && (!filter.getIncludeEnvironment() || minecraft.level != null)
+        && (!filter.getIncludePlayerList() || minecraft.getConnection() != null)
+        && auxiliarySnapshotsPending.getAndSet(false)) {
+        emitCurrentAuxiliarySnapshots(connection, filter, serverObserver, closed);
+      }
     };
     subscription.listen(BotPostTickEvent.class, stateListener);
 
