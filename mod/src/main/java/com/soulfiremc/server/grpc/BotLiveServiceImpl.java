@@ -773,7 +773,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
     if (requested == 0) {
       return DEFAULT_HEARTBEAT_SECONDS;
     }
-    return Math.max(MIN_HEARTBEAT_SECONDS, Math.min(requested, MAX_HEARTBEAT_SECONDS));
+    return Math.clamp(Integer.toUnsignedLong(requested), MIN_HEARTBEAT_SECONDS, MAX_HEARTBEAT_SECONDS);
   }
 
   private static void emitLifecycle(
@@ -3527,7 +3527,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
       var lease = instance.botControlLeaseManager().acquire(
         botId,
         ServerRPCConstants.USER_CONTEXT_KEY.get().getUniqueId(),
-        Duration.ofSeconds(request.getTtlSeconds()));
+        Duration.ofSeconds(Integer.toUnsignedLong(request.getTtlSeconds())));
       responseObserver.onNext(AcquireBotControlResponse.newBuilder()
         .setLease(buildControlLease(lease))
         .build());
@@ -3556,7 +3556,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
         botId,
         ServerRPCConstants.USER_CONTEXT_KEY.get().getUniqueId(),
         request.getToken(),
-        Duration.ofSeconds(request.getTtlSeconds()));
+        Duration.ofSeconds(Integer.toUnsignedLong(request.getTtlSeconds())));
       responseObserver.onNext(RenewBotControlResponse.newBuilder()
         .setLease(buildControlLease(lease))
         .build());
