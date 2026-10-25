@@ -884,6 +884,7 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
           .setZ(player.getZ())
           .setDimension(level.dimension().identifier().toString()));
       }
+      context.reportProgress(progress("Build finished"));
       result.complete(builder.build());
     }
 

@@ -121,6 +121,9 @@ class BuildRecoveryTest {
         result.getOutcomesList().stream().map(outcome -> outcome.getStatus()).toList());
       verify(fixture.inventory).setSelectedSlot(3);
       assertEquals(2, fixture.interactions);
+      assertEquals(4, fixture.progress.getCurrent());
+      assertEquals(4, fixture.progress.getTotal());
+      assertEquals(1.0, fixture.progress.getFraction());
     }
   }
 
@@ -231,6 +234,23 @@ class BuildRecoveryTest {
   }
 
   @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void reportsAllProcessedPlacementsForPartialBuilds(boolean allMissing) throws Exception {
+    try (var fixture = new Fixture()) {
+      var factory = allMissing
+        ? fixture.factory("gold_block", "gold_block", "gold_block")
+        : fixture.factory("stone", "gold_block", "stone");
+      var result = fixture.finish(fixture.start(factory, 0));
+      assertEquals(allMissing ? 0 : 2, result.getBlocksPlaced());
+      assertEquals(allMissing ? 3 : 1, result.getBlocksFailed());
+      assertEquals(3, result.getOutcomesCount());
+      assertEquals(3, fixture.progress.getCurrent());
+      assertEquals(3, fixture.progress.getTotal());
+      assertEquals(1.0, fixture.progress.getFraction());
+    }
+  }
+
+  @ParameterizedTest
   @MethodSource("unsignedPartitions")
   void assignsOnlyTheRequestedUnsignedPartition(int count, int index, List<Integer> expected) throws Exception {
     try (var fixture = new Fixture()) {
@@ -245,6 +265,10 @@ class BuildRecoveryTest {
       assertEquals(0, result.getBlocksFailed());
       assertEquals(expected, result.getOutcomesList().stream().map(outcome -> outcome.getPosition().getX()).toList());
       assertEquals(Set.copyOf(expected.stream().map(x -> new BlockPos(x, 64, 0)).toList()), fixture.blocks.keySet());
+      assertEquals(expected.size(), fixture.progress.getCurrent());
+      assertTrue(fixture.progress.hasTotal());
+      assertEquals(expected.size(), fixture.progress.getTotal());
+      assertEquals(1.0, fixture.progress.getFraction());
     }
   }
 
