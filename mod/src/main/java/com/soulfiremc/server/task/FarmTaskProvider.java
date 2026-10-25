@@ -126,10 +126,6 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
       validateDimension(context, input.getCenter());
       center = toBlockPos(input.getCenter());
     }
-    var player = Objects.requireNonNull(
-      context.bot().minecraft().player,
-      "Bot player is not available"
-    );
     var result = new CompletableFuture<FarmTaskResult>();
     return new BotTaskExecution(
       new FarmControl(
@@ -142,7 +138,6 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
         input.getCompleteWhenNoMatureCrops(),
         rescanInterval,
         input.getRestoreSelectedSlot(),
-        player.getInventory().getSelectedSlot(),
         PathfindingSupport.buildConstraint(
           context.bot(),
           input.getOptions()
@@ -259,9 +254,10 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
     private final boolean completeWhenNoMatureCrops;
     private final int rescanIntervalTicks;
     private final boolean restoreSelectedSlot;
-    private final int originalSelectedSlot;
     private final PathConstraint constraint;
     private final CompletableFuture<FarmTaskResult> result;
+    private int originalSelectedSlot;
+    private boolean active;
     private @Nullable CropTarget target;
     private @Nullable PathExecutor path;
     private Stage stage = Stage.SCAN;
@@ -282,7 +278,6 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
       boolean completeWhenNoMatureCrops,
       int rescanIntervalTicks,
       boolean restoreSelectedSlot,
-      int originalSelectedSlot,
       PathConstraint constraint,
       CompletableFuture<FarmTaskResult> result
     ) {
@@ -295,7 +290,6 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
       this.completeWhenNoMatureCrops = completeWhenNoMatureCrops;
       this.rescanIntervalTicks = rescanIntervalTicks;
       this.restoreSelectedSlot = restoreSelectedSlot;
-      this.originalSelectedSlot = originalSelectedSlot;
       this.constraint = constraint;
       this.result = result;
     }
@@ -903,7 +897,14 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
     }
 
     @Override
+    public void onStarted() {
+      originalSelectedSlot = requirePlayer().getInventory().getSelectedSlot();
+      active = true;
+    }
+
+    @Override
     public void onSuspended() {
+      active = false;
       if (path != null) {
         path.onSuspended();
       }
@@ -918,6 +919,7 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
 
     @Override
     public void onResumed() {
+      active = true;
       if (path != null) {
         path.onResumed();
       }
@@ -928,17 +930,23 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
       ControlStopReason reason,
       @Nullable Throwable cause
     ) {
-      stopPath(reason, cause);
-      if (breaking) {
-        var gameMode = context.bot().minecraft().gameMode;
-        if (gameMode != null) {
-          gameMode.stopDestroyBlock();
+      try {
+        stopPath(reason, cause);
+        if (active) {
+          active = false;
+          if (breaking) {
+            var gameMode = context.bot().minecraft().gameMode;
+            if (gameMode != null) {
+              gameMode.stopDestroyBlock();
+            }
+            breaking = false;
+          }
+          restoreSelectedSlot();
         }
-        breaking = false;
-      }
-      restoreSelectedSlot();
-      if (reason != ControlStopReason.COMPLETED && !result.isDone()) {
-        result.cancel(true);
+      } finally {
+        if (reason != ControlStopReason.COMPLETED && !result.isDone()) {
+          result.cancel(true);
+        }
       }
     }
 

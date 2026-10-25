@@ -159,10 +159,6 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
         selected.add(transformed.get(index));
       }
     }
-    var player = Objects.requireNonNull(
-      context.bot().minecraft().player,
-      "Bot player is not available"
-    );
     var navigationConstraint = protectSchematic(
       PathfindingSupport.buildConstraint(
         context.bot(),
@@ -180,7 +176,6 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
         navigationConstraint,
         input.getBreakIncorrectBlocks(),
         input.getRestoreSelectedSlot(),
-        player.getInventory().getSelectedSlot(),
         result
       ),
       result
@@ -447,8 +442,9 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
     private final PathConstraint navigationConstraint;
     private final boolean breakIncorrect;
     private final boolean restoreSelectedSlot;
-    private final int originalSelectedSlot;
     private final CompletableFuture<BuildTaskResult> result;
+    private int originalSelectedSlot;
+    private boolean active;
     private final List<BuildBlockOutcome> outcomes = new ArrayList<>();
     private @Nullable PathExecutor activePath;
     private @Nullable Placement current;
@@ -467,7 +463,6 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
       PathConstraint navigationConstraint,
       boolean breakIncorrect,
       boolean restoreSelectedSlot,
-      int originalSelectedSlot,
       CompletableFuture<BuildTaskResult> result
     ) {
       this.context = context;
@@ -475,7 +470,6 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
       this.navigationConstraint = navigationConstraint;
       this.breakIncorrect = breakIncorrect;
       this.restoreSelectedSlot = restoreSelectedSlot;
-      this.originalSelectedSlot = originalSelectedSlot;
       this.result = result;
     }
 
@@ -806,7 +800,6 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
     }
 
     private void complete() {
-      restoreSelectedSlot();
       var builder = BuildTaskResult.newBuilder()
         .setReason(failed == 0
           ? BuildCompletionReason.BUILD_COMPLETION_REASON_COMPLETED
@@ -851,7 +844,15 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
     }
 
     @Override
+    public void onStarted() {
+      originalSelectedSlot = Objects.requireNonNull(context.bot().minecraft().player)
+        .getInventory().getSelectedSlot();
+      active = true;
+    }
+
+    @Override
     public void onSuspended() {
+      active = false;
       if (activePath != null) {
         activePath.onSuspended();
       }
@@ -860,6 +861,7 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
 
     @Override
     public void onResumed() {
+      active = true;
       if (activePath != null) {
         activePath.onResumed();
       }
@@ -870,15 +872,21 @@ public final class BuildTaskProvider implements BotTaskProvider<BuildTask> {
       ControlStopReason reason,
       @Nullable Throwable cause
     ) {
-      var path = activePath;
-      activePath = null;
-      if (path != null) {
-        path.onStopped(reason, cause);
-      }
-      context.bot().controlState().resetAll();
-      restoreSelectedSlot();
-      if (reason != ControlStopReason.COMPLETED && !result.isDone()) {
-        result.cancel(true);
+      try {
+        var path = activePath;
+        activePath = null;
+        if (path != null) {
+          path.onStopped(reason, cause);
+        }
+        if (active) {
+          active = false;
+          context.bot().controlState().resetAll();
+          restoreSelectedSlot();
+        }
+      } finally {
+        if (reason != ControlStopReason.COMPLETED && !result.isDone()) {
+          result.cancel(true);
+        }
       }
     }
 
