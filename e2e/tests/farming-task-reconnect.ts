@@ -25,6 +25,7 @@ export default {
             yield* placeBot(bot, { x: 0.5, y: 64, z: 0.5 });
             yield* bot.selectHotbar(0);
             yield* rcon("fill 4260 63 4 4278 64 12 air");
+            yield* rcon("kill @e[type=item,x=4260,y=-200,z=4,dx=18,dy=300,dz=8]", { check: false });
             for (const x of forced) yield* rcon(`forceload remove ${x} 0`);
           }).pipe(Effect.orDie),
         );
