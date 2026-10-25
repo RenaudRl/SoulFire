@@ -839,9 +839,13 @@ public final class CollectBlocksTaskProvider
       var origin = player.blockPosition();
       var eyePosition = player.getEyePosition();
       var candidates = new HashSet<DirectBreakTarget>();
+      var radiusSquared = searchRadius * searchRadius;
       for (var x = -5; x <= 5; x++) {
         for (var z = -5; z <= 5; z++) {
           for (var y = -4; y <= 6; y++) {
+            if (x * x + y * y + z * z > radiusSquared) {
+              continue;
+            }
             var position = origin.offset(x, y, z);
             if (
               !isDirectBreakCandidate(origin, position)

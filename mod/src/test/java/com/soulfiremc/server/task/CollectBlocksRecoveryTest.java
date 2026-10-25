@@ -18,6 +18,7 @@
 package com.soulfiremc.server.task;
 
 import com.soulfiremc.grpc.generated.BotTaskProgress;
+import com.soulfiremc.grpc.generated.CollectBlocksCompletionReason;
 import com.soulfiremc.grpc.generated.CollectBlocksTask;
 import com.soulfiremc.grpc.generated.CollectBlocksTaskResult;
 import com.soulfiremc.grpc.generated.IntRange;
@@ -57,6 +58,7 @@ import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
@@ -171,6 +173,30 @@ class CollectBlocksRecoveryTest {
       first.control().onStopped(ControlStopReason.CANCELLED, null);
       assertEquals(3, fixture.finish(fixture.start(factory)).getBlocksBroken());
       assertEquals(1, fixture.constructions.get(new SFVec3i(1, 64, 0)));
+    }
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "1, 1, 0, 0, true",
+    "1, 3, 0, 0, false",
+    "1, 1, 0, 1, false",
+    "1, 0, 2, 0, false",
+    "2, 1, 0, 1, true",
+    "2, 0, 2, 0, true"
+  })
+  void nearbyMiningRespectsTheSearchSphere(int radius, int x, int y, int z, boolean collect) throws Exception {
+    try (var fixture = new Fixture()) {
+      var target = new BlockPos(x, 64 + y, z);
+      fixture.blocks.clear();
+      fixture.blocks.put(target, Blocks.DIRT.defaultBlockState());
+      fixture.clipY = target.getY();
+      var execution = fixture.start(fixture.factory(radius, target.getY(), 1));
+      var result = fixture.finish(execution);
+      assertEquals(collect ? CollectBlocksCompletionReason.COLLECT_BLOCKS_COMPLETION_REASON_TARGET_REACHED
+        : CollectBlocksCompletionReason.COLLECT_BLOCKS_COMPLETION_REASON_NO_MATCHING_BLOCKS, result.getReason());
+      assertEquals(collect ? 1 : 0, result.getBlocksBroken());
+      assertEquals(!collect, fixture.blocks.containsKey(target));
     }
   }
 
@@ -296,6 +322,7 @@ class CollectBlocksRecoveryTest {
     boolean nether;
     boolean predictionPending;
     boolean avoidSubmerged;
+    int clipY = 64;
     int removed;
     int attempts;
     int rejectedChecks;
@@ -349,9 +376,13 @@ class CollectBlocksRecoveryTest {
     }
 
     BotTaskProvider.ExecutionFactory factory() {
+      return factory(6, 64, 3);
+    }
+
+    BotTaskProvider.ExecutionFactory factory(int radius, int targetY, int count) {
       return new CollectBlocksTaskProvider().prepare(CollectBlocksTask.newBuilder()
-        .addBlockIds("minecraft:dirt").setCount(3).setSearchRadius(6).setAvoidSubmergedTargets(avoidSubmerged)
-        .setTargetYRange(IntRange.newBuilder().setMinimum(64).setMaximum(64)).build());
+        .addBlockIds("minecraft:dirt").setCount(count).setSearchRadius(radius).setAvoidSubmergedTargets(avoidSubmerged)
+        .setTargetYRange(IntRange.newBuilder().setMinimum(targetY).setMaximum(targetY)).build());
     }
 
     BotTaskExecution start(BotTaskProvider.ExecutionFactory factory) throws Exception {
@@ -407,7 +438,7 @@ class CollectBlocksRecoveryTest {
         ? Fluids.WATER.defaultFluidState() : Fluids.EMPTY.defaultFluidState());
       when(level.clip(any())).thenAnswer(call -> {
         var to = ((ClipContext) call.getArgument(0)).getTo();
-        return new BlockHitResult(to, Direction.UP, BlockPos.containing(to.x, 64, to.z), false);
+        return new BlockHitResult(to, Direction.UP, BlockPos.containing(to.x, clipY, to.z), false);
       });
       minecraft.player = player;
       minecraft.level = level;
