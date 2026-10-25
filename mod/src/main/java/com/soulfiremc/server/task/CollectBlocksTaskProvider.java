@@ -798,7 +798,7 @@ public final class CollectBlocksTaskProvider
           }
         }
       }
-      var orderedCandidates = candidates.stream()
+      return candidates.stream()
         .sorted(candidateComparator(origin))
         .filter(position -> canHarvest(
           level.getBlockState(position.toBlockPos())
@@ -812,15 +812,10 @@ public final class CollectBlocksTaskProvider
             position.toBlockPos()
           )
         ))
-        .limit(MAX_CANDIDATES)
-        .toList();
-      if (!avoidSubmergedTargets) {
-        return orderedCandidates;
-      }
-      return orderedCandidates.stream()
         .filter(position ->
-          !hasFluidAbove(level, origin, position.toBlockPos())
+          !avoidSubmergedTargets || !hasFluidAbove(level, origin, position.toBlockPos())
         )
+        .limit(MAX_CANDIDATES)
         .toList();
     }
 

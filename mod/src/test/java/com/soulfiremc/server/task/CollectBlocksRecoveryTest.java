@@ -48,6 +48,7 @@ import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.BeforeAll;
@@ -170,6 +171,32 @@ class CollectBlocksRecoveryTest {
   }
 
   @Test
+  void continuesWithDryCandidatesBeyondTheSubmergedPrefix() throws Exception {
+    try (var fixture = new Fixture()) {
+      fixture.avoidSubmerged = true;
+      var factory = fixture.factory();
+      var first = fixture.start(factory);
+      fixture.until(first, () -> fixture.progress.getCurrent() == 1);
+      first.control().onStopped(ControlStopReason.CANCELLED, null);
+      fixture.blocks.clear();
+      for (var x = -4; x < 4; x++) {
+        for (var z = -4; z < 4; z++) {
+          if (x != 0 || z != 0) fixture.submerged.add(new BlockPos(x, 64, z));
+        }
+      }
+      fixture.submerged.add(new BlockPos(4, 64, 0));
+      for (var position : fixture.submerged) fixture.blocks.put(position, Blocks.DIRT.defaultBlockState());
+      var dry = new BlockPos(6, 64, 0);
+      fixture.blocks.put(dry, Blocks.DIRT.defaultBlockState());
+      var result = fixture.finish(fixture.start(factory));
+      assertEquals(2, result.getBlocksBroken());
+      assertEquals(2, fixture.removed);
+      assertFalse(fixture.blocks.containsKey(dry));
+      assertEquals(fixture.submerged, fixture.blocks.keySet());
+    }
+  }
+
+  @Test
   void waitsForTheLastObservedTargetChunk() throws Exception {
     try (var fixture = new Fixture()) {
       var factory = fixture.factory();
@@ -251,6 +278,7 @@ class CollectBlocksRecoveryTest {
   private static final class Fixture implements AutoCloseable {
     final Map<BlockPos, BlockState> blocks = new HashMap<>();
     final Set<SFVec3i> rejected = new HashSet<>();
+    final Set<BlockPos> submerged = new HashSet<>();
     final Map<SFVec3i, Integer> constructions = new HashMap<>();
     final MockedConstruction<BlockBreakAction> breaks;
     final MockedStatic<PathExecutor> paths = mockStatic(PathExecutor.class);
@@ -263,6 +291,7 @@ class CollectBlocksRecoveryTest {
     boolean loaded = true;
     boolean nether;
     boolean predictionPending;
+    boolean avoidSubmerged;
     int removed;
     int attempts;
     int rejectedChecks;
@@ -317,7 +346,7 @@ class CollectBlocksRecoveryTest {
 
     BotTaskProvider.ExecutionFactory factory() {
       return new CollectBlocksTaskProvider().prepare(CollectBlocksTask.newBuilder()
-        .addBlockIds("minecraft:dirt").setCount(3).setSearchRadius(6)
+        .addBlockIds("minecraft:dirt").setCount(3).setSearchRadius(6).setAvoidSubmergedTargets(avoidSubmerged)
         .setTargetYRange(IntRange.newBuilder().setMinimum(64).setMaximum(64)).build());
     }
 
@@ -346,6 +375,8 @@ class CollectBlocksRecoveryTest {
       when(level.getChunkSource()).thenReturn(chunks);
       when(chunks.hasChunk(anyInt(), anyInt())).thenAnswer(_ -> loaded);
       when(level.getBlockState(any())).thenAnswer(call -> blocks.getOrDefault(call.getArgument(0), Blocks.AIR.defaultBlockState()));
+      when(level.getFluidState(any())).thenAnswer(call -> submerged.contains(((BlockPos) call.getArgument(0)).below())
+        ? Fluids.WATER.defaultFluidState() : Fluids.EMPTY.defaultFluidState());
       when(level.clip(any())).thenAnswer(call -> {
         var to = ((ClipContext) call.getArgument(0)).getTo();
         return new BlockHitResult(to, Direction.UP, BlockPos.containing(to.x, 64, to.z), false);
