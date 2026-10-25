@@ -331,9 +331,12 @@ public final class PathfindingSupport {
         maximumY
       );
     }
+    var requestedSearchTimeout = Integer.toUnsignedLong(
+      options.getSearchTimeoutSeconds()
+    );
     if (options.hasBreakBlockPenalty()
       || options.hasPlaceBlockPenalty()
-      || options.getSearchTimeoutSeconds() > 0
+      || requestedSearchTimeout != 0
       || options.hasSprint()
       || options.getSearchMode()
         != com.soulfiremc.grpc.generated.PathfindSearchMode.PATHFIND_SEARCH_MODE_UNSPECIFIED
@@ -352,10 +355,10 @@ public final class PathfindingSupport {
         options.getPlaceBlockPenalty(),
         "place_block_penalty"
       );
-      var searchTimeout = options.getSearchTimeoutSeconds() == 0
+      var searchTimeout = requestedSearchTimeout == 0
         ? OptionalInt.empty()
         : OptionalInt.of(Math.toIntExact(Math.min(
-          options.getSearchTimeoutSeconds(),
+          requestedSearchTimeout,
           3_600
         )));
       var searchMode = switch (options.getSearchMode()) {
