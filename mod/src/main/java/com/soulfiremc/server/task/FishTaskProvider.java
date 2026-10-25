@@ -63,7 +63,7 @@ public final class FishTaskProvider implements BotTaskProvider<FishTask> {
   public String summary(FishTask input) {
     return input.getMaximumCatches() == 0
       ? "Fish until cancelled"
-      : "Catch up to " + input.getMaximumCatches() + " fish";
+      : "Catch up to " + Integer.toUnsignedLong(input.getMaximumCatches()) + " fish";
   }
 
   @Override
@@ -75,16 +75,16 @@ public final class FishTaskProvider implements BotTaskProvider<FishTask> {
   public BotTaskExecution start(BotTaskContext context, FishTask input) {
     var castTimeout = input.getCastTimeoutTicks() == 0
       ? DEFAULT_CAST_TIMEOUT_TICKS
-      : Math.min(input.getCastTimeoutTicks(), MAX_CAST_TIMEOUT_TICKS);
+      : (int) Math.min(Integer.toUnsignedLong(input.getCastTimeoutTicks()), MAX_CAST_TIMEOUT_TICKS);
     var biteTimeout = input.getBiteTimeoutTicks() == 0
       ? DEFAULT_BITE_TIMEOUT_TICKS
-      : Math.min(input.getBiteTimeoutTicks(), MAX_BITE_TIMEOUT_TICKS);
+      : (int) Math.min(Integer.toUnsignedLong(input.getBiteTimeoutTicks()), MAX_BITE_TIMEOUT_TICKS);
     var result = new CompletableFuture<FishTaskResult>();
     return new BotTaskExecution(
       new FishControl(
         context,
-        input.getMaximumCatches(),
-        input.getMaximumFailedCasts(),
+        Integer.toUnsignedLong(input.getMaximumCatches()),
+        Integer.toUnsignedLong(input.getMaximumFailedCasts()),
         input.hasRod() ? input.getRod() : null,
         castTimeout,
         biteTimeout,
@@ -98,8 +98,8 @@ public final class FishTaskProvider implements BotTaskProvider<FishTask> {
 
   private static final class FishControl implements ControlTask {
     private final BotTaskContext context;
-    private final int maximumCatches;
-    private final int maximumFailedCasts;
+    private final long maximumCatches;
+    private final long maximumFailedCasts;
     private final @Nullable ItemSelector rodSelector;
     private final int castTimeoutTicks;
     private final int biteTimeoutTicks;
@@ -118,8 +118,8 @@ public final class FishTaskProvider implements BotTaskProvider<FishTask> {
 
     private FishControl(
       BotTaskContext context,
-      int maximumCatches,
-      int maximumFailedCasts,
+      long maximumCatches,
+      long maximumFailedCasts,
       @Nullable ItemSelector rodSelector,
       int castTimeoutTicks,
       int biteTimeoutTicks,
@@ -282,7 +282,7 @@ public final class FishTaskProvider implements BotTaskProvider<FishTask> {
         if (pendingCatch) {
           catches++;
           pendingCatch = false;
-          if (maximumCatches > 0 && catches >= maximumCatches) {
+          if (maximumCatches > 0 && Integer.toUnsignedLong(catches) >= maximumCatches) {
             complete(
               FishCompletionReason
                 .FISH_COMPLETION_REASON_CATCH_LIMIT_REACHED
@@ -333,20 +333,20 @@ public final class FishTaskProvider implements BotTaskProvider<FishTask> {
     private void report(String message) {
       var builder = BotTaskProgress.newBuilder()
         .setMessage(message)
-        .setCurrent(catches);
+        .setCurrent(Integer.toUnsignedLong(catches));
       if (maximumCatches > 0) {
         builder
           .setTotal(maximumCatches)
           .setFraction(Math.min(
             1.0,
-            (double) catches / maximumCatches
+            (double) Integer.toUnsignedLong(catches) / maximumCatches
           ));
       }
       context.reportProgress(builder.build());
     }
 
     private boolean failedCastLimitReached() {
-      return maximumFailedCasts > 0 && failedCasts >= maximumFailedCasts;
+      return maximumFailedCasts > 0 && Integer.toUnsignedLong(failedCasts) >= maximumFailedCasts;
     }
 
     private boolean completeForFailedCastLimit() {
