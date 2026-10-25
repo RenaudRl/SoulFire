@@ -32,7 +32,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /// Multiplexes the complete per-bot event contract onto one instance stream.
@@ -56,10 +55,9 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
     StreamObserver<InstanceEvent> responseObserver
   ) {
     var instanceId = UUID.fromString(request.getInstanceId());
-    ServerRPCConstants.USER_CONTEXT_KEY.get()
-      .hasPermissionOrThrow(PermissionContext.instance(
-        InstancePermission.READ_BOT_INFO,
-        instanceId));
+    var user = ServerRPCConstants.USER_CONTEXT_KEY.get();
+    var permission = PermissionContext.instance(InstancePermission.READ_BOT_INFO, instanceId);
+    user.hasPermissionOrThrow(permission);
     var instance = soulFireServer.getInstance(instanceId)
       .orElseThrow(() -> Status.NOT_FOUND
         .withDescription("Instance '%s' not found".formatted(instanceId))
@@ -67,20 +65,17 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
     var parent = (ServerCallStreamObserver<InstanceEvent>) responseObserver;
     var closed = new AtomicBoolean(false);
     var children = new ConcurrentHashMap<UUID, MultiplexingObserver>();
-    var unsubscribe = new AtomicReference<Runnable>(() -> {});
     var selectedBotIds = parseBotIds(request.getFilter().getBotIdsList());
     var botFilter = botFilter(request.getFilter());
     var legacyEnvelope = !request.getFilter().hasBotEvents();
 
-    Runnable cleanup = () -> {
+    var subscription = new AuthorizedStream(soulFireServer, user, permission, parent, closed);
+    subscription.addCleanup(() -> {
       synchronized (children) {
-        if (closed.compareAndSet(false, true)) {
-          unsubscribe.get().run();
-          children.values().forEach(MultiplexingObserver::cancel);
-          children.clear();
-        }
+        children.values().forEach(MultiplexingObserver::cancel);
+        children.clear();
       }
-    };
+    });
     Consumer<UUID> addBot = botId -> {
       if (closed.get() || parent.isCancelled()
         || (!selectedBotIds.isEmpty() && !selectedBotIds.contains(botId))) {
@@ -94,7 +89,7 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
       if (account == null) {
         return;
       }
-      var child = new MultiplexingObserver(parent, botId, account.lastKnownName(), legacyEnvelope);
+      var child = new MultiplexingObserver(parent, closed, botId, account.lastKnownName(), legacyEnvelope);
       children.put(botId, child);
       try {
         botLiveService.watchBotEvents(
@@ -111,34 +106,37 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
       }
     };
 
-    parent.setOnReadyHandler(() -> children.values().forEach(MultiplexingObserver::notifyReady));
-    parent.setOnCancelHandler(cleanup);
-    synchronized (children) {
-      if (closed.get() || parent.isCancelled()) {
-        return;
-      }
-      unsubscribe.set(instance.botStateManager().addStatusListener(event -> {
-        synchronized (children) {
-          if (closed.get()) {
-            return;
-          }
-          if (event.removedBotId() != null) {
-            var child = children.remove(event.removedBotId());
-            if (child != null) {
-              child.cancel();
-            }
-          } else if (event.status() != null) {
-            addBot.accept(UUID.fromString(event.status().getProfileId()));
-          }
+    try {
+      parent.setOnReadyHandler(() -> children.values().forEach(MultiplexingObserver::notifyReady));
+      parent.setOnCancelHandler(subscription::close);
+      if (!subscription.start()) return;
+      synchronized (children) {
+        if (closed.get() || parent.isCancelled()) {
+          return;
         }
-      }));
-      try {
+        var removeStatusListener = instance.botStateManager().addStatusListener(event -> {
+          synchronized (children) {
+            if (closed.get()) {
+              return;
+            }
+            if (event.removedBotId() != null) {
+              var child = children.remove(event.removedBotId());
+              if (child != null) {
+                child.cancel();
+              }
+            } else if (event.status() != null) {
+              addBot.accept(UUID.fromString(event.status().getProfileId()));
+            }
+          }
+        });
+        subscription.addCleanup(removeStatusListener);
+        if (closed.get()) return;
         // Listen before taking the snapshot so account changes cannot fall between them.
         instance.settingsSource().accounts().keySet().forEach(addBot);
-      } catch (Throwable t) {
-        cleanup.run();
-        throw t;
       }
+    } catch (RuntimeException | Error error) {
+      subscription.close();
+      throw error;
     }
   }
 
@@ -167,6 +165,7 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
 
   private static final class MultiplexingObserver extends ServerCallStreamObserver<BotEvent> {
     private final ServerCallStreamObserver<InstanceEvent> parent;
+    private final AtomicBoolean parentClosed;
     private final String botId;
     private final String botName;
     private final boolean legacyEnvelope;
@@ -176,11 +175,13 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
 
     private MultiplexingObserver(
       ServerCallStreamObserver<InstanceEvent> parent,
+      AtomicBoolean parentClosed,
       UUID botId,
       String botName,
       boolean legacyEnvelope
     ) {
       this.parent = parent;
+      this.parentClosed = parentClosed;
       this.botId = botId.toString();
       this.botName = botName;
       this.legacyEnvelope = legacyEnvelope;
@@ -220,7 +221,7 @@ public final class InstanceLiveServiceImpl extends InstanceLiveServiceGrpc.Insta
 
     @Override
     public boolean isCancelled() {
-      return cancelled.get() || parent.isCancelled();
+      return parentClosed.get() || cancelled.get() || parent.isCancelled();
     }
 
     @Override

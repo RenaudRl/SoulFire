@@ -30,15 +30,21 @@ import com.soulfiremc.server.SoulFireServer;
 import com.soulfiremc.server.account.AuthType;
 import com.soulfiremc.server.account.MinecraftAccount;
 import com.soulfiremc.server.account.service.OfflineJavaData;
+import com.soulfiremc.server.api.SoulFireAPI;
+import com.soulfiremc.server.api.event.UserPermissionsChangedEvent;
+import com.soulfiremc.server.api.event.UserSessionsInvalidatedEvent;
 import com.soulfiremc.server.settings.lib.InstanceSettingsDelegate;
+import com.soulfiremc.server.user.AuthSystem;
 import com.soulfiremc.server.user.SoulFireUser;
 import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.ServerCallStreamObserver;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -54,13 +60,19 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 final class InstanceLiveServiceTest {
   private final UUID instanceId = UUID.randomUUID();
   private final SoulFireServer server = mock();
+  private final SoulFireUser user = mock();
+  private final AuthSystem auth = mock();
+  private final UUID owner = UUID.randomUUID();
+  private final Instant issuedAt = Instant.now();
   private final InstanceManager instance = mock();
   private final BotStateManager states = mock();
   private final BotLiveServiceImpl botLiveService = mock();
@@ -75,6 +87,11 @@ final class InstanceLiveServiceTest {
 
   @BeforeEach
   void setUp() {
+    when(server.authSystem()).thenReturn(auth);
+    when(user.getUniqueId()).thenReturn(owner);
+    when(user.getIssuedAt()).thenReturn(issuedAt);
+    when(user.hasPermission(any())).thenReturn(true);
+    when(auth.authenticateBySubject(owner, issuedAt, 0L)).thenReturn(Optional.of(user));
     when(server.getInstance(instanceId)).thenReturn(Optional.of(instance));
     when(instance.botStateManager()).thenReturn(states);
     var settings = mock(InstanceSettingsDelegate.class);
@@ -102,6 +119,72 @@ final class InstanceLiveServiceTest {
       child.setOnCancelHandler(cancellations::incrementAndGet);
       return null;
     }).when(botLiveService).watchBotEvents(any(), any());
+  }
+
+  @AfterEach
+  void tearDown() {
+    if (cancelParent != null) cancelParent.run();
+  }
+
+  @Test
+  void revocationClosesAnEmptyInstanceAndRemovesItsAccountListener() {
+    watch(InstanceEventFilter.getDefaultInstance());
+    var staleListener = listeners.getFirst();
+    SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, owner, 1L));
+    assertTrue(listeners.isEmpty());
+    var account = account();
+    accounts.put(account.profileId(), account);
+    staleListener.accept(BotStateManager.StatusEvent.updated(BotStatus.newBuilder()
+      .setProfileId(account.profileId().toString()).build()));
+    assertEquals(0, subscriptions.get());
+    verify(parent).onError(argThat(
+      error -> Status.fromThrowable(error).getCode() == Status.Code.UNAUTHENTICATED));
+  }
+
+  @Test
+  void revocationDuringAccountListenerSetupRemovesTheLateSubscription() {
+    doAnswer(call -> {
+      Consumer<BotStateManager.StatusEvent> listener = call.getArgument(0);
+      listeners.add(listener);
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, owner, 1L));
+      return (Runnable) () -> listeners.remove(listener);
+    }).when(states).addStatusListener(any());
+    assertTrue(listeners.isEmpty());
+    watch(InstanceEventFilter.getDefaultInstance());
+    assertTrue(listeners.isEmpty());
+  }
+
+  @Test
+  void revocationWhileAChildIsBeingInstalledCancelsItsLateHandler() {
+    var account = account();
+    accounts.put(account.profileId(), account);
+    doAnswer(invocation -> {
+      ServerCallStreamObserver<BotEvent> child = invocation.getArgument(1);
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, owner, 1L));
+      child.setOnCancelHandler(cancellations::incrementAndGet);
+      child.onNext(BotEvent.newBuilder().setChat(BotChatEvent.getDefaultInstance()).build());
+      return null;
+    }).when(botLiveService).watchBotEvents(any(), any());
+    watch(InstanceEventFilter.getDefaultInstance());
+    assertEquals(1, cancellations.get());
+    assertTrue(listeners.isEmpty());
+    assertTrue(received.isEmpty());
+  }
+
+  @Test
+  void permissionLossStopsChildrenBeforeTheParentTerminalCallbackReturns() {
+    var account = account();
+    accounts.put(account.profileId(), account);
+    watch(InstanceEventFilter.getDefaultInstance());
+    doAnswer(_ -> {
+      children.get(account.profileId()).onNext(BotEvent.newBuilder().setChat(BotChatEvent.getDefaultInstance()).build());
+      return null;
+    }).when(parent).onError(any());
+    when(user.hasPermission(any())).thenReturn(false);
+    SoulFireAPI.postEvent(new UserPermissionsChangedEvent(server, owner));
+    assertTrue(listeners.isEmpty());
+    assertEquals(1, cancellations.get());
+    assertTrue(received.isEmpty());
   }
 
   @Test
@@ -188,7 +271,7 @@ final class InstanceLiveServiceTest {
   }
 
   private void watch(InstanceEventFilter filter) {
-    var context = Context.current().withValue(ServerRPCConstants.USER_CONTEXT_KEY, mock(SoulFireUser.class));
+    var context = Context.current().withValue(ServerRPCConstants.USER_CONTEXT_KEY, user);
     context.run(() -> new InstanceLiveServiceImpl(server, botLiveService).watchInstanceEvents(
       WatchInstanceEventsRequest.newBuilder().setInstanceId(instanceId.toString()).setFilter(filter).build(), parent));
   }

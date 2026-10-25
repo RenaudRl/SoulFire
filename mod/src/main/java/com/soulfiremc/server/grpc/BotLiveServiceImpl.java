@@ -381,36 +381,42 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
   public void watchBotEvents(WatchBotEventsRequest request, StreamObserver<BotEvent> responseObserver) {
     var instanceId = UUID.fromString(request.getInstanceId());
     var botId = UUID.fromString(request.getBotId());
-    ServerRPCConstants.USER_CONTEXT_KEY.get()
-      .hasPermissionOrThrow(PermissionContext.instance(InstancePermission.READ_BOT_INFO, instanceId));
+    var user = ServerRPCConstants.USER_CONTEXT_KEY.get();
+    var permission = PermissionContext.instance(InstancePermission.READ_BOT_INFO, instanceId);
+    user.hasPermissionOrThrow(permission);
 
     var instance = requireConfiguredBot(soulFireServer, instanceId, botId);
-    var filter = request.getFilter();
     var serverObserver = (ServerCallStreamObserver<BotEvent>) responseObserver;
-    var closed = new AtomicBoolean(false);
+    var closed = new AtomicBoolean();
+    var subscription = new AuthorizedStream(soulFireServer, user, permission, serverObserver, closed);
+    serverObserver.setOnCancelHandler(subscription::close);
+    if (!subscription.start()) return;
+    try {
+      installBotEventSubscription(request, botId, instance, serverObserver, closed, subscription);
+    } catch (RuntimeException | Error error) {
+      subscription.close();
+      throw error;
+    }
+  }
+
+  private void installBotEventSubscription(
+    WatchBotEventsRequest request,
+    UUID botId,
+    InstanceManager instance,
+    ServerCallStreamObserver<BotEvent> serverObserver,
+    AtomicBoolean closed,
+    AuthorizedStream subscription
+  ) {
+    var filter = request.getFilter();
     var eventContext = new BotEventContext(botId);
     EVENT_CONTEXTS.put(serverObserver, eventContext);
+    subscription.addCleanup(() -> EVENT_CONTEXTS.remove(serverObserver));
     var lastState = new AtomicReference<BotLiveState>(null);
     var lastInventory = new AtomicReference<BotInventoryStateResponse>(null);
     var lastEntities = new AtomicReference<Map<Integer, ObservedEntity>>(Map.of());
     var lastEntityScan = new AtomicLong();
     var spawnedConnection = new AtomicReference<BotConnection>(null);
     var deaths = new BotDeathTracker();
-    var cleanupActions = new CopyOnWriteArrayList<Runnable>();
-    Runnable cleanup = () -> {
-      if (!closed.compareAndSet(false, true)) {
-        return;
-      }
-      cleanupActions.forEach(action -> {
-        try {
-          action.run();
-        } catch (Throwable t) {
-          log.debug("Failed to clean up bot event subscription", t);
-        }
-      });
-      EVENT_CONTEXTS.remove(serverObserver);
-    };
-    serverObserver.setOnCancelHandler(cleanup);
     serverObserver.setOnReadyHandler(() -> {
       if (!eventContext.consumeDropped()) {
         return;
@@ -477,12 +483,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
         return;
       }
       if (event.removedBotId() != null && event.removedBotId().equals(botId)) {
-        synchronized (serverObserver) {
-          if (!closed.get() && !serverObserver.isCancelled()) {
-            serverObserver.onCompleted();
-          }
-        }
-        cleanup.run();
+        subscription.complete();
         return;
       }
       if (event.status() != null && event.status().getProfileId().equals(botId.toString())) {
@@ -491,7 +492,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
           .build());
       }
     });
-    cleanupActions.add(removeStatusListener);
+    subscription.addCleanup(removeStatusListener);
 
     Consumer<BotConnectionInitEvent> connectionInitListener = event -> {
       if (!matches(event.connection(), instance, botId)) {
@@ -511,7 +512,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
           null);
       }
     };
-    register(cleanupActions, BotConnectionInitEvent.class, connectionInitListener);
+    subscription.listen(BotConnectionInitEvent.class, connectionInitListener);
 
     Consumer<BotConnectedEvent> connectedListener = event -> {
       if (filter.getIncludeLifecycle() && matches(event.connection(), instance, botId)) {
@@ -522,7 +523,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
           null);
       }
     };
-    register(cleanupActions, BotConnectedEvent.class, connectedListener);
+    subscription.listen(BotConnectedEvent.class, connectedListener);
 
     Consumer<BotPostTickEvent> stateListener = event -> {
       var connection = event.connection();
@@ -539,7 +540,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
         spawnedConnection,
         deaths);
     };
-    register(cleanupActions, BotPostTickEvent.class, stateListener);
+    subscription.listen(BotPostTickEvent.class, stateListener);
 
     Consumer<BotDisconnectedEvent> disconnectListener = event -> {
       if (!matches(event.connection(), instance, botId)) {
@@ -561,7 +562,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
       spawnedConnection.set(null);
       deaths.reset();
     };
-    register(cleanupActions, BotDisconnectedEvent.class, disconnectListener);
+    subscription.listen(BotDisconnectedEvent.class, disconnectListener);
 
     if (filter.getIncludeLifecycle()) {
       // Deaths are also seen per tick, but the bot can respawn before the next
@@ -585,7 +586,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
             kill.message().getString());
         }
       };
-      register(cleanupActions, BotPacketPreReceiveEvent.class, deathListener);
+      subscription.listen(BotPacketPreReceiveEvent.class, deathListener);
     }
 
     if (filter.getIncludeChat()) {
@@ -605,7 +606,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
           .build();
         emitBotEvent(serverObserver, closed, BotEvent.newBuilder().setChat(chat).build());
       };
-      register(cleanupActions, ChatMessageReceiveEvent.class, chatListener);
+      subscription.listen(ChatMessageReceiveEvent.class, chatListener);
     }
 
     if (includesPacketEvents(filter)) {
@@ -624,7 +625,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
           log.debug("Failed to map typed bot packet event", t);
         }
       };
-      register(cleanupActions, BotPacketPreReceiveEvent.class, packetListener);
+      subscription.listen(BotPacketPreReceiveEvent.class, packetListener);
     }
 
     if (filter.getIncludeEntityEvents()) {
@@ -646,7 +647,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
           lastEntities,
           false);
       };
-      register(cleanupActions, BotPostEntityTickEvent.class, entityListener);
+      subscription.listen(BotPostEntityTickEvent.class, entityListener);
     }
 
     if (filter.getIncludeBlockUpdates()) {
@@ -674,7 +675,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
           .setBlockUpdate(update)
           .build());
       };
-      register(cleanupActions, BotBlockUpdateEvent.class, blockListener);
+      subscription.listen(BotBlockUpdateEvent.class, blockListener);
     }
 
     if (filter.getIncludeDamage()) {
@@ -689,7 +690,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
           .build();
         emitBotEvent(serverObserver, closed, BotEvent.newBuilder().setDamage(damage).build());
       };
-      register(cleanupActions, BotDamageEvent.class, damageListener);
+      subscription.listen(BotDamageEvent.class, damageListener);
     }
 
     if (filter.getIncludeInventory()) {
@@ -702,7 +703,7 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
             lastInventory);
         }
       };
-      register(cleanupActions, BotOpenContainerEvent.class, containerListener);
+      subscription.listen(BotOpenContainerEvent.class, containerListener);
     }
   }
 
@@ -726,15 +727,6 @@ public final class BotLiveServiceImpl extends BotLiveServiceGrpc.BotLiveServiceI
   private static boolean matches(BotConnection connection, InstanceManager instance, UUID botId) {
     return connection.instanceManager() == instance
       && connection.accountProfileId().equals(botId);
-  }
-
-  private static <E extends SoulFireEvent> void register(
-    List<Runnable> cleanupActions,
-    Class<E> eventType,
-    Consumer<E> listener
-  ) {
-    SoulFireAPI.registerListener(eventType, listener);
-    cleanupActions.add(() -> SoulFireAPI.unregisterListener(eventType, listener));
   }
 
   private static void emitBotEvent(

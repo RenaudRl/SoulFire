@@ -185,68 +185,56 @@ public final class BotServiceImpl extends BotServiceGrpc.BotServiceImplBase {
   public void watchBotStatuses(
     WatchBotStatusesRequest request,
     StreamObserver<WatchBotStatusesResponse> responseObserver) {
-    Runnable closeSubscription = () -> {
-    };
+    AuthorizedStream stream = null;
     try {
       var instanceId = UUID.fromString(request.getInstanceId());
-      ServerRPCConstants.USER_CONTEXT_KEY.get()
-        .hasPermissionOrThrow(PermissionContext.instance(InstancePermission.READ_BOT_INFO, instanceId));
+      var user = ServerRPCConstants.USER_CONTEXT_KEY.get();
+      var permission = PermissionContext.instance(InstancePermission.READ_BOT_INFO, instanceId);
+      user.hasPermissionOrThrow(permission);
       var instance = soulFireServer.getInstance(instanceId)
         .orElseThrow(() -> Status.NOT_FOUND
           .withDescription("Instance '%s' not found".formatted(instanceId))
           .asRuntimeException());
-      var observerLock = new Object();
+      var closed = new AtomicBoolean();
+      stream = new AuthorizedStream(soulFireServer, user, permission, responseObserver, closed);
+      if (responseObserver instanceof ServerCallStreamObserver<WatchBotStatusesResponse> serverObserver) {
+        serverObserver.setOnCancelHandler(stream::close);
+      }
+      if (!stream.start()) return;
       var pendingEvents = new ArrayDeque<WatchBotStatusesResponse>();
       var initialSnapshotSent = new boolean[]{false};
       var subscription = instance.botStateManager().subscribe(event -> {
         var response = WatchBotStatusesResponse.newBuilder();
-        if (event.status() != null) {
-          response.setUpdate(event.status());
-        } else if (event.removedBotId() != null) {
-          response.setRemovedBotId(event.removedBotId().toString());
-        } else {
-          return;
-        }
-        synchronized (observerLock) {
-          if (initialSnapshotSent[0]) {
-            responseObserver.onNext(response.build());
-          } else {
-            pendingEvents.addLast(response.build());
-          }
+        if (event.status() != null) response.setUpdate(event.status());
+        else if (event.removedBotId() != null) response.setRemovedBotId(event.removedBotId().toString());
+        else return;
+        synchronized (responseObserver) {
+          if (closed.get()) return;
+          if (initialSnapshotSent[0]) responseObserver.onNext(response.build());
+          else pendingEvents.addLast(response.build());
         }
       });
-      closeSubscription = subscription.close();
-
-      if (responseObserver instanceof ServerCallStreamObserver<WatchBotStatusesResponse> serverObserver) {
-        serverObserver.setOnCancelHandler(closeSubscription);
-      }
-      synchronized (observerLock) {
+      stream.addCleanup(subscription.close());
+      synchronized (responseObserver) {
+        if (closed.get()) return;
         responseObserver.onNext(WatchBotStatusesResponse.newBuilder()
-          .setSnapshot(BotStatusSnapshot.newBuilder()
-            .addAllBots(subscription.snapshot())
-            .build())
+          .setSnapshot(BotStatusSnapshot.newBuilder().addAllBots(subscription.snapshot()).build())
           .build());
         initialSnapshotSent[0] = true;
-        while (!pendingEvents.isEmpty()) {
-          responseObserver.onNext(pendingEvents.removeFirst());
-        }
+        while (!closed.get() && !pendingEvents.isEmpty()) responseObserver.onNext(pendingEvents.removeFirst());
+        pendingEvents.clear();
       }
-    } catch (StatusRuntimeException exception) {
-      closeSubscription.run();
-      responseObserver.onError(exception);
-    } catch (IllegalArgumentException exception) {
-      closeSubscription.run();
-      responseObserver.onError(Status.INVALID_ARGUMENT
-        .withDescription(exception.getMessage())
-        .withCause(exception)
-        .asRuntimeException());
-    } catch (Throwable throwable) {
-      closeSubscription.run();
-      log.error("Error watching bot statuses", throwable);
-      responseObserver.onError(Status.INTERNAL
-        .withDescription(throwable.getMessage())
-        .withCause(throwable)
-        .asRuntimeException());
+    } catch (Throwable error) {
+      var status = switch (error) {
+        case StatusRuntimeException exception -> exception.getStatus();
+        case IllegalArgumentException exception -> Status.INVALID_ARGUMENT.withDescription(exception.getMessage()).withCause(exception);
+        default -> {
+          log.error("Error watching bot statuses", error);
+          yield Status.INTERNAL.withDescription(error.getMessage()).withCause(error);
+        }
+      };
+      if (stream != null) stream.fail(status);
+      else responseObserver.onError(status.asRuntimeException());
     }
   }
 
