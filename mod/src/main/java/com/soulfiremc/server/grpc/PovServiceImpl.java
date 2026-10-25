@@ -35,6 +35,7 @@ import com.soulfiremc.grpc.generated.PovStreamFeedback;
 import com.soulfiremc.grpc.generated.PovWatchRequest;
 import com.soulfiremc.server.SoulFireServer;
 import com.soulfiremc.server.api.SoulFireAPI;
+import com.soulfiremc.server.api.event.UserPermissionsChangedEvent;
 import com.soulfiremc.server.api.event.UserSessionsInvalidatedEvent;
 import com.soulfiremc.server.api.event.bot.BotDisconnectedEvent;
 import com.soulfiremc.server.bot.BotConnection;
@@ -299,7 +300,7 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
     private final UUID id;
     private final BotConnection bot;
     private final UUID owner;
-    private final SoulFireUser user;
+    private volatile SoulFireUser user;
     private final String inputToken = UUID.randomUUID().toString() + UUID.randomUUID();
     private volatile WebSocketWriter inputChannel;
     private final BotControlLeaseManager leases;
@@ -309,6 +310,8 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
     private final ChannelFutureListener onTransportClosed = _ -> close();
     private final Consumer<BotDisconnectedEvent> onBotDisconnected;
     private final Consumer<UserSessionsInvalidatedEvent> onSessionsInvalidated;
+    private final Consumer<UserPermissionsChangedEvent> onPermissionsChanged;
+    private final Object authorizationLock = new Object();
     private final Object lifecycleLock = new Object();
     private final Object observerLock = new Object();
     private final AtomicBoolean rendering = new AtomicBoolean();
@@ -350,6 +353,9 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
           fail(Status.UNAUTHENTICATED.withDescription("POV authorization was invalidated"));
         }
       };
+      this.onPermissionsChanged = event -> {
+        if (event.soulFireServer() == server && event.userId().equals(owner)) refreshAuthorization();
+      };
       this.observer = observer; this.width = even(width); this.height = even(height);
       this.format = codecs.contains("av1") ? PovVideoEncoder.Format.AV1 : codecs.contains("h264-high") ? PovVideoEncoder.Format.HIGH : PovVideoEncoder.Format.BASELINE;
       this.maxFps = Math.clamp(maxFps == 0 ? 60 : maxFps, 15, 120);
@@ -362,20 +368,39 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
         synchronized (lifecycleLock) {
           SoulFireAPI.registerListener(BotDisconnectedEvent.class, onBotDisconnected);
           SoulFireAPI.registerListener(UserSessionsInvalidatedEvent.class, onSessionsInvalidated);
+          SoulFireAPI.registerListener(UserPermissionsChangedEvent.class, onPermissionsChanged);
           // HTTP/1 defers request cancellation after disconnect to finish responses.
           // A disconnected POV must release control without that grace period.
           if (transportClosed != null) transportClosed.addListener(onTransportClosed);
           observer.setOnCancelHandler(this::close);
         }
-        // Catch revocation between request authentication and listener registration.
-        if (server.authSystem().authenticateBySubject(owner, user.getIssuedAt(), user.getSessionVersion()).isEmpty()) {
-          fail(Status.UNAUTHENTICATED.withDescription("POV authorization was invalidated"));
-        }
+        // Catch revocation or role changes between request authentication and listener registration.
+        refreshAuthorization();
         // Disconnection may have begun before the listener was registered.
         if (bot.isDisconnecting()) disconnected();
       } catch (RuntimeException | Error error) {
         close();
         throw error;
+      }
+    }
+
+    private void refreshAuthorization() {
+      // Serialize refreshes so an older lookup cannot overwrite a newer permission snapshot.
+      synchronized (authorizationLock) {
+        if (closed.get()) return;
+        var authenticated = server.authSystem().authenticateBySubject(owner, user.getIssuedAt(), user.getSessionVersion());
+        if (authenticated.isEmpty()) {
+          fail(Status.UNAUTHENTICATED.withDescription("POV authorization was invalidated"));
+          return;
+        }
+        var current = authenticated.orElseThrow();
+        var instanceId = bot.instanceManager().id();
+        if (!current.hasPermission(PermissionContext.instance(InstancePermission.READ_BOT_INFO, instanceId))
+          || !current.hasPermission(PermissionContext.instance(InstancePermission.CONTROL_BOT_ACTIONS, instanceId))) {
+          fail(Status.PERMISSION_DENIED.withDescription("POV access was revoked"));
+          return;
+        }
+        user = current;
       }
     }
 
@@ -499,6 +524,7 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
         sessions.remove(id, this);
         SoulFireAPI.unregisterListener(BotDisconnectedEvent.class, onBotDisconnected);
         SoulFireAPI.unregisterListener(UserSessionsInvalidatedEvent.class, onSessionsInvalidated);
+        SoulFireAPI.unregisterListener(UserPermissionsChangedEvent.class, onPermissionsChanged);
         if (transportClosed != null) transportClosed.removeListener(onTransportClosed);
       }
       if (inputChannel != null) inputChannel.close();

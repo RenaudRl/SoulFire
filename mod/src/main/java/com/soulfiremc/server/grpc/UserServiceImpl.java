@@ -21,6 +21,7 @@ import com.google.protobuf.util.Timestamps;
 import com.soulfiremc.grpc.generated.*;
 import com.soulfiremc.server.SoulFireServer;
 import com.soulfiremc.server.api.SoulFireAPI;
+import com.soulfiremc.server.api.event.UserPermissionsChangedEvent;
 import com.soulfiremc.server.database.UserRole;
 import com.soulfiremc.server.database.generated.Tables;
 import com.soulfiremc.server.database.generated.tables.records.PluginPermissionGrantsRecord;
@@ -227,6 +228,8 @@ public final class UserServiceImpl extends UserServiceGrpc.UserServiceImplBase {
           throw new IllegalArgumentException("User not found: " + userId);
         }
       });
+
+      SoulFireAPI.postEvent(new UserPermissionsChangedEvent(soulFireServer, userId));
 
       responseObserver.onNext(UpdateUserResponse.newBuilder().build());
       responseObserver.onCompleted();

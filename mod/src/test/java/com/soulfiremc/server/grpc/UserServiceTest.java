@@ -27,6 +27,8 @@ import com.soulfiremc.grpc.generated.UserInfoRequest;
 import com.soulfiremc.grpc.generated.UserInfoResponse;
 import com.soulfiremc.grpc.generated.UserRole;
 import com.soulfiremc.server.SoulFireServer;
+import com.soulfiremc.server.api.SoulFireAPI;
+import com.soulfiremc.server.api.event.UserPermissionsChangedEvent;
 import com.soulfiremc.server.database.generated.Tables;
 import com.soulfiremc.server.user.AuthSystem;
 import com.soulfiremc.server.user.SoulFireUser;
@@ -52,6 +54,7 @@ import org.sqlite.SQLiteException;
 
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -111,12 +114,28 @@ final class UserServiceTest {
       .setId(created.getId()).build(), observer)));
     assertEquals(UserRole.USER, info.getRole());
     assertEquals(stored.getEmail(), info.getEmail());
-    context.run(() -> service.updateUser(UpdateUserRequest.newBuilder().setId(created.getId())
-      .setUsername("updated-user").setEmail("updated@example.com").setRole(UserRole.ADMIN).build(), mock()));
-    var updated = dsl.selectFrom(Tables.USERS).where(Tables.USERS.ID.eq(id.toString())).fetchSingle();
-    assertEquals("updated-user", updated.getUsername());
-    assertEquals("updated@example.com", updated.getEmail());
-    assertEquals(UserRole.ADMIN.name(), updated.getRole());
+    var observedRoles = new ArrayList<UserRole>();
+    Consumer<UserPermissionsChangedEvent> listener = event -> {
+      if (event.soulFireServer() == server && event.userId().equals(id)) {
+        observedRoles.add(UserRole.valueOf(dsl.select(Tables.USERS.ROLE).from(Tables.USERS)
+          .where(Tables.USERS.ID.eq(id.toString())).fetchSingle(Tables.USERS.ROLE)));
+      }
+    };
+    SoulFireAPI.registerListener(UserPermissionsChangedEvent.class, listener);
+    try {
+      context.run(() -> service.updateUser(UpdateUserRequest.newBuilder().setId(created.getId())
+        .setUsername("updated-user").setEmail("updated@example.com").setRole(UserRole.ADMIN).build(), mock()));
+      var updated = dsl.selectFrom(Tables.USERS).where(Tables.USERS.ID.eq(id.toString())).fetchSingle();
+      assertEquals("updated-user", updated.getUsername());
+      assertEquals("updated@example.com", updated.getEmail());
+      assertEquals(UserRole.ADMIN.name(), updated.getRole());
+      assertEquals(List.of(UserRole.ADMIN), observedRoles);
+      assertConflict(context, () -> service.updateUser(UpdateUserRequest.newBuilder().setId(created.getId())
+        .setUsername("existing-user").setEmail("updated@example.com").setRole(UserRole.USER).build(), mock()));
+      assertEquals(List.of(UserRole.ADMIN), observedRoles);
+    } finally {
+      SoulFireAPI.unregisterListener(UserPermissionsChangedEvent.class, listener);
+    }
   }
 
   @ParameterizedTest
