@@ -43,6 +43,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
+import java.math.BigInteger;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -54,7 +55,7 @@ import java.util.concurrent.CompletionException;
 /// Clears an inclusive cuboid without allowing the pathfinder to mine outside
 /// the requested region.
 public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask> {
-  private static final long MAX_REGION_VOLUME = 32_768;
+  private static final BigInteger MAX_REGION_VOLUME = BigInteger.valueOf(32_768);
   private static final int RECOVERY_CHUNK_TICKS = 100;
   private static final Set<ControlResource> RESOURCES = Set.of(
     ControlResource.MOVEMENT,
@@ -72,7 +73,7 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
   public String summary(ExcavateTask input) {
     return input.getMaximumBlocks() == 0
       ? "Excavate a cuboid"
-      : "Excavate up to " + input.getMaximumBlocks() + " blocks";
+      : "Excavate up to " + Integer.toUnsignedLong(input.getMaximumBlocks()) + " blocks";
   }
 
   @Override
@@ -127,7 +128,7 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
     if (!recovering) {
       recovery.region = selectRegion(level,
         Objects.requireNonNull(context.bot().minecraft().player).blockPosition(),
-        minimum, maximum, input.getMaximumBlocks());
+        minimum, maximum, Integer.toUnsignedLong(input.getMaximumBlocks()));
       recovery.pending.addAll(recovery.region.selected());
     }
     var region = Objects.requireNonNull(recovery.region);
@@ -151,7 +152,7 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
     BlockPos origin,
     BlockPos minimum,
     BlockPos maximum,
-    int maximumBlocks
+    long maximumBlocks
   ) {
     var allDiggable = new LinkedHashSet<SFVec3i>();
     var skipped = 0;
@@ -229,8 +230,10 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
     var sizeX = Math.abs((long) from.getX() - to.getX()) + 1;
     var sizeY = Math.abs((long) from.getY() - to.getY()) + 1;
     var sizeZ = Math.abs((long) from.getZ() - to.getZ()) + 1;
-    var volume = sizeX * sizeY * sizeZ;
-    if (volume > MAX_REGION_VOLUME) {
+    var volume = BigInteger.valueOf(sizeX)
+      .multiply(BigInteger.valueOf(sizeY))
+      .multiply(BigInteger.valueOf(sizeZ));
+    if (volume.compareTo(MAX_REGION_VOLUME) > 0) {
       throw Status.RESOURCE_EXHAUSTED
         .withDescription(
           "Excavation cuboid contains %d blocks; maximum is %d"

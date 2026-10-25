@@ -19,6 +19,7 @@ package com.soulfiremc.server.task;
 
 import com.soulfiremc.grpc.generated.BlockPosition;
 import com.soulfiremc.grpc.generated.BotTaskProgress;
+import com.soulfiremc.grpc.generated.ExcavateCompletionReason;
 import com.soulfiremc.grpc.generated.ExcavateTask;
 import com.soulfiremc.grpc.generated.ExcavateTaskResult;
 import com.soulfiremc.server.api.BotTaskExecution;
@@ -95,6 +96,19 @@ class ExcavateRecoveryTest {
         assertTrue(fixture.blocks.containsKey(new BlockPos(12, 64, 0)));
         assertTrue(fixture.blocks.containsKey(new BlockPos(16, 64, 0)));
       }
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {Integer.MAX_VALUE, Integer.MIN_VALUE, -1})
+  void acceptsTheFullUnsignedBlockLimit(int maximumBlocks) throws Exception {
+    try (var fixture = new Fixture()) {
+      var result = fixture.finish(fixture.start(fixture.factory(maximumBlocks)));
+      assertEquals(ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_AREA_CLEARED, result.getReason());
+      assertEquals(5, result.getBlocksBroken());
+      assertEquals(12, result.getBlocksSkipped());
+      assertEquals(0, result.getUnreachableBlocks());
+      assertEquals(5, fixture.removed);
     }
   }
 
