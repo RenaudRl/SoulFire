@@ -96,6 +96,30 @@ class CollectBlocksRecoveryTest {
     TestBootstrap.bootstrapForTest();
   }
 
+  @ParameterizedTest
+  @ValueSource(ints = {Integer.MIN_VALUE, -1})
+  void keepsLargeUnsignedTargetsUntilAvailableBlocksAreExhausted(int count) throws Exception {
+    try (var fixture = new Fixture()) {
+      var result = fixture.finish(fixture.start(fixture.factory(6, 64, count)));
+      assertEquals(CollectBlocksCompletionReason.COLLECT_BLOCKS_COMPLETION_REASON_NO_MATCHING_BLOCKS, result.getReason());
+      assertEquals(5, result.getBlocksBroken());
+      assertEquals(5, fixture.removed);
+      assertEquals(Integer.toUnsignedLong(count), fixture.progress.getTotal());
+      assertEquals(5, fixture.progress.getCurrent());
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {Integer.MIN_VALUE, -1})
+  void clampsLargeUnsignedSearchRadiiToTheServerLimit(int radius) throws Exception {
+    try (var fixture = new Fixture()) {
+      var result = fixture.finish(fixture.start(fixture.factory(radius, 64, 2)));
+      assertEquals(CollectBlocksCompletionReason.COLLECT_BLOCKS_COMPLETION_REASON_TARGET_REACHED, result.getReason());
+      assertEquals(2, result.getBlocksBroken());
+      assertEquals(2, fixture.removed);
+    }
+  }
+
   @Test
   void keepsConfirmedProgressAcrossRepeatedExecutions() throws Exception {
     try (var fixture = new Fixture()) {

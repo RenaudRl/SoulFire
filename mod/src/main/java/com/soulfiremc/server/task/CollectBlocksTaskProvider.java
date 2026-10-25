@@ -106,7 +106,7 @@ public final class CollectBlocksTaskProvider
 
   @Override
   public String summary(CollectBlocksTask input) {
-    return "Collect " + Math.max(1, input.getCount()) + " matching blocks";
+    return "Collect " + Math.max(1, Integer.toUnsignedLong(input.getCount())) + " matching blocks";
   }
 
   @Override
@@ -134,10 +134,10 @@ public final class CollectBlocksTaskProvider
         .withDescription("block_ids or tags must contain at least one selector")
         .asRuntimeException();
     }
-    var count = Math.max(1, input.getCount());
+    var count = Math.max(1, Integer.toUnsignedLong(input.getCount()));
     var radius = input.getSearchRadius() == 0
       ? DEFAULT_SEARCH_RADIUS
-      : Math.min(input.getSearchRadius(), MAX_SEARCH_RADIUS);
+      : (int) Math.min(Integer.toUnsignedLong(input.getSearchRadius()), MAX_SEARCH_RADIUS);
     var result = new CompletableFuture<CollectBlocksTaskResult>();
     var control = new CollectBlocksControl(
       context,
@@ -386,7 +386,7 @@ public final class CollectBlocksTaskProvider
     private final BotTaskContext context;
     private final Set<String> blockIds;
     private final Set<String> tags;
-    private final int targetCount;
+    private final long targetCount;
     private final int searchRadius;
     private final PathfindOptions pathOptions;
     private final boolean avoidSubmergedTargets;
@@ -407,7 +407,7 @@ public final class CollectBlocksTaskProvider
       BotTaskContext context,
       Set<String> blockIds,
       Set<String> tags,
-      int targetCount,
+      long targetCount,
       int searchRadius,
       PathfindOptions pathOptions,
       boolean avoidSubmergedTargets,
@@ -573,7 +573,7 @@ public final class CollectBlocksTaskProvider
       activePath = null;
       if (path != null) {
         var completed = path.completedBlockBreaks();
-        recovery.blocksBroken += (int) Math.min(completed.stream().filter(activeTargets::contains).count(),
+        recovery.blocksBroken += Math.min(completed.stream().filter(activeTargets::contains).count(),
           targetCount - recovery.blocksBroken);
         path.pendingBlockBreak().filter(activeTargets::contains).filter(position -> !completed.contains(position))
           .ifPresent(position -> {
@@ -696,7 +696,7 @@ public final class CollectBlocksTaskProvider
           return;
         }
         recovery.consecutiveStalledPaths = 0;
-        recovery.blocksBroken += (int) Math.min(
+        recovery.blocksBroken += Math.min(
           confirmedBreaks,
           targetCount - recovery.blocksBroken
         );
@@ -706,7 +706,7 @@ public final class CollectBlocksTaskProvider
         ));
       } catch (CompletionException exception) {
         var confirmedBreaks = confirmedBreaks(path);
-        recovery.blocksBroken += (int) Math.min(
+        recovery.blocksBroken += Math.min(
           confirmedBreaks,
           targetCount - recovery.blocksBroken
         );
@@ -899,7 +899,7 @@ public final class CollectBlocksTaskProvider
       if (hasHarvestableTarget) {
         return false;
       }
-      recovery.blocksBroken += (int) Math.min(
+      recovery.blocksBroken += Math.min(
         confirmedBreaks(path),
         targetCount - recovery.blocksBroken
       );
@@ -1050,7 +1050,7 @@ public final class CollectBlocksTaskProvider
       var level = context.bot().minecraft().level;
       var builder = CollectBlocksTaskResult.newBuilder()
         .setReason(reason)
-        .setBlocksBroken(recovery.blocksBroken);
+        .setBlocksBroken((int) recovery.blocksBroken);
       if (player != null && level != null) {
         builder.setFinalPosition(WorldPosition.newBuilder()
           .setX(player.getX())
@@ -1134,7 +1134,7 @@ public final class CollectBlocksTaskProvider
   private static final class RecoveryState {
     private final Set<SFVec3i> rejectedTargets = new HashSet<>();
     private final Map<SFVec3i, Set<SFVec3i>> rejectedAdjacentPositions = new HashMap<>();
-    private int blocksBroken;
+    private long blocksBroken;
     private int consecutiveStalledPaths;
     private @Nullable String dimension;
     private @Nullable SFVec3i pendingBreak;

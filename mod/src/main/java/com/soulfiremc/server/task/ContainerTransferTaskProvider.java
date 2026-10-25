@@ -146,7 +146,8 @@ public final class ContainerTransferTaskProvider
         .asRuntimeException();
     }
     for (var operation : input.getOperationsList()) {
-      if (operation.getCount() == 0 || operation.getCount() > MAX_COUNT) {
+      var count = Integer.toUnsignedLong(operation.getCount());
+      if (count == 0 || count > MAX_COUNT) {
         throw Status.INVALID_ARGUMENT
           .withDescription(
             "operation count must be between one and " + MAX_COUNT
