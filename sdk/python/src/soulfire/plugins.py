@@ -278,7 +278,7 @@ class ReflectivePlugin(_ReflectivePluginBase):
 
 
 class ServiceFactory(Protocol):
-    def __call__[T](self, client_type: Callable[..., T]) -> T: ...
+    def __call__[T: ConnectClient](self, client_type: Callable[..., T]) -> T: ...
 
 
 class SoulFirePluginModule[T](Protocol):
@@ -369,7 +369,7 @@ class PluginCatalog(_PluginCatalogBase):
     def require[T](self, module: SoulFirePluginModule[T]) -> T:
         return module.create(self, self._require_descriptor(module))
 
-    def service[T](self, client_type: Callable[..., T]) -> T:
+    def service[T: ConnectClient](self, client_type: Callable[..., T]) -> T:
         return self._service_factory(client_type)
 
     @fn("PluginCatalog.refresh")

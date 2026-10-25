@@ -203,7 +203,7 @@ class SoulFire:
             RpcErrorInterceptor(),
             *interceptors,
         )
-        self._clients: list[Any] = []
+        self._clients: list[ConnectClient] = []
         self._local_server_handle: LocalServerHandle | None = None
         self._required_capabilities = tuple(required_capabilities)
         self._required_plugins = tuple(required_plugins)
@@ -515,7 +515,7 @@ class SoulFire:
         handle = yield from validate(self._require_local_server)
         yield from rpc("SoulFire.stop_local_server", lambda: asyncio.to_thread(handle.stop))
 
-    def service[ClientT](self, client_type: Callable[..., ClientT]) -> ClientT:
+    def service[ClientT: ConnectClient](self, client_type: Callable[..., ClientT]) -> ClientT:
         client = client_type(
             self._address,
             protocol=ProtocolType.GRPC_WEB,
@@ -671,8 +671,11 @@ class SoulFire:
                 yield from add_finalizer(
                     lambda _, handle=handle: from_async(lambda: asyncio.to_thread(handle.close))
                 )
+            # A generated Close RPC can shadow the inherited transport cleanup method.
             for client in clients:
-                yield from add_finalizer(lambda _, client=client: from_async(client.close))
+                yield from add_finalizer(
+                    lambda _, client=client: from_async(lambda: ConnectClient.close(client))
+                )
 
         yield from scoped(release)
 

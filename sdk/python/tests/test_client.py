@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any, cast
 
 import pytest
+from connectrpc.client import ConnectClient
 from connectrpc.protocol import ProtocolType
 from effect_py import gen, run_async, scoped, succeed
 from google.protobuf.struct_pb2 import Value
@@ -39,14 +40,15 @@ from soulfire.sdk_pb2 import (
 )
 
 
-class FakeGeneratedClient:
+class FakeGeneratedClient(ConnectClient):
     def __init__(self, address: str, **options: Any) -> None:
+        super().__init__(address, **options)
         self.address = address
         self.options = options
-        self.closed = False
 
-    async def close(self) -> None:
-        self.closed = True
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
 
 class FakeSdkClient(FakeGeneratedClient):
@@ -61,17 +63,7 @@ class FakePluginApiClient(FakeGeneratedClient):
     pass
 
 
-class FakeGeneratedClientSync:
-    def __init__(self, address: str, **options: Any) -> None:
-        self.address = address
-        self.options = options
-        self.closed = False
-
-    async def close(self) -> None:
-        self.closed = True
-
-
-class FakeSdkClientSync(FakeGeneratedClientSync):
+class FakeSdkClientSync(FakeGeneratedClient):
     request = None
 
     async def handshake(self, request: object) -> SdkHandshakeResponse:
@@ -79,7 +71,7 @@ class FakeSdkClientSync(FakeGeneratedClientSync):
         return handshake_response()
 
 
-class FakePluginApiClientSync(FakeGeneratedClientSync):
+class FakePluginApiClientSync(FakeGeneratedClient):
     pass
 
 
