@@ -46,6 +46,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -176,6 +177,12 @@ public final class PathExecutor implements ControlTask {
 
   public Set<SFVec3i> completedBlockBreaks() {
     return Set.copyOf(completedBlockBreaks);
+  }
+
+  /// Returns the current attempted break position without retaining its action or world.
+  public Optional<SFVec3i> pendingBlockBreak() {
+    return worldActionQueue.peek() instanceof BlockBreakAction action && action.breakAttempted()
+      ? Optional.of(action.blockPosition()) : Optional.empty();
   }
 
   public void completeEarly() {

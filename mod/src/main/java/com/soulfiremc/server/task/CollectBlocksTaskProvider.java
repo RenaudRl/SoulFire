@@ -29,6 +29,7 @@ import com.soulfiremc.grpc.generated.PathfindOptions;
 import com.soulfiremc.grpc.generated.WorldPosition;
 import com.soulfiremc.server.api.BotTaskExecution;
 import com.soulfiremc.server.api.BotTaskProvider;
+import com.soulfiremc.server.bot.BlockPredictionSupport;
 import com.soulfiremc.server.bot.ControlPriority;
 import com.soulfiremc.server.bot.ControlResource;
 import com.soulfiremc.server.bot.ControlStopReason;
@@ -70,6 +71,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -81,6 +83,7 @@ import java.util.stream.Collectors;
 public final class CollectBlocksTaskProvider
   implements BotTaskProvider<CollectBlocksTask> {
   private static final int DEFAULT_SEARCH_RADIUS = 32;
+  private static final int RECOVERY_OBSERVATION_TICKS = 100;
   private static final int MAX_SEARCH_RADIUS = 64;
   private static final int MAX_CANDIDATES = 64;
   private static final int MAX_FAILED_APPROACHES_PER_TARGET = 4;
@@ -113,6 +116,16 @@ public final class CollectBlocksTaskProvider
     BotTaskContext context,
     CollectBlocksTask input
   ) {
+    return start(context, input, new RecoveryState());
+  }
+
+  @Override
+  public ExecutionFactory prepare(CollectBlocksTask input) {
+    var recovery = new RecoveryState();
+    return context -> start(context, input, recovery);
+  }
+
+  private BotTaskExecution start(BotTaskContext context, CollectBlocksTask input, RecoveryState recovery) {
     if (input.getBlockIdsList().isEmpty() && input.getTagsList().isEmpty()) {
       throw Status.INVALID_ARGUMENT
         .withDescription("block_ids or tags must contain at least one selector")
@@ -133,7 +146,8 @@ public final class CollectBlocksTaskProvider
       input.getAvoidSubmergedTargets(),
       input.getRequireLineOfSight(),
       input.hasTargetYRange() ? input.getTargetYRange() : null,
-      result
+      result,
+      recovery
     );
     return new BotTaskExecution(control, result);
   }
@@ -344,16 +358,15 @@ public final class CollectBlocksTaskProvider
     private final boolean requireLineOfSight;
     private final @Nullable IntRange targetYRange;
     private final CompletableFuture<CollectBlocksTaskResult> result;
-    private final Set<SFVec3i> rejectedTargets = new HashSet<>();
-    private final Map<SFVec3i, Set<SFVec3i>>
-      rejectedAdjacentPositions = new HashMap<>();
+    private final RecoveryState recovery;
+    private boolean active;
+    private boolean recoveryPending;
+    private int observationTicks;
     private @Nullable PathExecutor activePath;
     private @Nullable BlockBreakAction activeNearbyBreak;
     private @Nullable DirectBreakTarget activeNearbyTarget;
     private int activeNearbyBreakTicks;
     private Set<SFVec3i> activeTargets = Set.of();
-    private int blocksBroken;
-    private int consecutiveStalledPaths;
 
     private CollectBlocksControl(
       BotTaskContext context,
@@ -365,7 +378,8 @@ public final class CollectBlocksTaskProvider
       boolean avoidSubmergedTargets,
       boolean requireLineOfSight,
       @Nullable IntRange targetYRange,
-      CompletableFuture<CollectBlocksTaskResult> result
+      CompletableFuture<CollectBlocksTaskResult> result,
+      RecoveryState recovery
     ) {
       this.context = context;
       this.blockIds = blockIds;
@@ -377,11 +391,16 @@ public final class CollectBlocksTaskProvider
       this.requireLineOfSight = requireLineOfSight;
       this.targetYRange = targetYRange;
       this.result = result;
+      this.recovery = recovery;
+      recoveryPending = recovery.dimension != null;
     }
 
     @Override
     public void tick() {
       if (result.isDone()) {
+        return;
+      }
+      if (!recoverInterruptedWork()) {
         return;
       }
       if (activePath != null) {
@@ -395,7 +414,7 @@ public final class CollectBlocksTaskProvider
         tickNearbyBreak();
         return;
       }
-      if (blocksBroken >= targetCount) {
+      if (recovery.blocksBroken >= targetCount) {
         complete(
           CollectBlocksCompletionReason
             .COLLECT_BLOCKS_COMPLETION_REASON_TARGET_REACHED
@@ -412,7 +431,7 @@ public final class CollectBlocksTaskProvider
       var candidates = findCandidates();
       if (candidates.isEmpty()) {
         complete(
-          rejectedTargets.isEmpty()
+          recovery.rejectedTargets.isEmpty()
             ? CollectBlocksCompletionReason
               .COLLECT_BLOCKS_COMPLETION_REASON_NO_MATCHING_BLOCKS
             : CollectBlocksCompletionReason
@@ -422,6 +441,7 @@ public final class CollectBlocksTaskProvider
       }
       var target = candidates.getFirst();
       activeTargets = Set.of(target);
+      recovery.observedPosition = target;
       context.reportProgress(progress(
         "Planning route to matching block",
         CollectBlocksTaskProgressDetail.Phase.PHASE_PLANNING_ROUTE
@@ -430,10 +450,10 @@ public final class CollectBlocksTaskProvider
         context.bot(),
         pathOptions
       );
-      if (!rejectedTargets.isEmpty()) {
+      if (!recovery.rejectedTargets.isEmpty()) {
         constraint = new BlockBreakBlacklistConstraint(
           constraint,
-          rejectedTargets
+          recovery.rejectedTargets
         );
       }
       var level = context.bot().minecraft().level;
@@ -452,15 +472,87 @@ public final class CollectBlocksTaskProvider
           player.getEyePosition(),
           target,
           !requireLineOfSight,
-          rejectedAdjacentPositions
+          recovery.rejectedAdjacentPositions
         )),
         constraint
       );
       activePath.onStarted();
     }
 
+    private boolean recoverInterruptedWork() {
+      var level = Objects.requireNonNull(context.bot().minecraft().level);
+      if (!level.dimension().identifier().toString().equals(recovery.dimension)) {
+        result.completeExceptionally(Status.FAILED_PRECONDITION
+          .withDescription("Cannot resume block collection in another dimension").asRuntimeException());
+        return false;
+      }
+      if (recoveryPending) {
+        var anchor = Objects.requireNonNull(recovery.observedPosition).toBlockPos();
+        if (!SFBlockHelpers.isChunkLoaded(level, anchor)) {
+          context.reportProgress(progress("Waiting for collection target chunk",
+            CollectBlocksTaskProgressDetail.Phase.PHASE_PLANNING_ROUTE));
+          if (++observationTicks >= RECOVERY_OBSERVATION_TICKS) {
+            result.completeExceptionally(Status.DEADLINE_EXCEEDED
+              .withDescription("Collection target chunk did not arrive after reconnect").asRuntimeException());
+          }
+          return false;
+        }
+        observationTicks = 0;
+        recoveryPending = false;
+      }
+      var pending = recovery.pendingBreak;
+      if (pending == null) return true;
+      var position = pending.toBlockPos();
+      if (!SFBlockHelpers.isChunkLoaded(level, position)
+        || BlockPredictionSupport.hasPendingPrediction(context.bot(), position)) {
+        recovery.clearedTicks = 0;
+        context.reportProgress(progress("Waiting to confirm interrupted block collection",
+          CollectBlocksTaskProgressDetail.Phase.PHASE_BREAKING_BLOCK));
+        if (++observationTicks >= RECOVERY_OBSERVATION_TICKS) {
+          result.completeExceptionally(Status.DEADLINE_EXCEEDED
+            .withDescription("Interrupted collection block did not become observable").asRuntimeException());
+        }
+        return false;
+      }
+      observationTicks = 0;
+      if (BlockPredictionSupport.isClearedBreakTarget(level.getBlockState(position))) {
+        if (++recovery.clearedTicks < BlockBreakAction.CLEARED_STATE_SETTLE_TICKS) return false;
+        recovery.blocksBroken = Math.min(targetCount, recovery.blocksBroken + 1);
+        context.reportProgress(progress("Interrupted matching block confirmed mined",
+          CollectBlocksTaskProgressDetail.Phase.PHASE_BREAKING_BLOCK));
+      }
+      recovery.pendingBreak = null;
+      recovery.clearedTicks = 0;
+      return true;
+    }
+
+    private void checkpointNearbyBreak() {
+      if (activeNearbyBreak != null && activeNearbyTarget != null && activeNearbyBreak.breakAttempted()) {
+        recovery.pendingBreak = activeNearbyTarget.position();
+        recovery.clearedTicks = 0;
+      }
+    }
+
+    private void stopPath(ControlStopReason reason, @Nullable Throwable cause) {
+      var path = activePath;
+      activePath = null;
+      if (path != null) {
+        var completed = path.completedBlockBreaks();
+        recovery.blocksBroken += (int) Math.min(completed.stream().filter(activeTargets::contains).count(),
+          targetCount - recovery.blocksBroken);
+        path.pendingBlockBreak().filter(activeTargets::contains).filter(position -> !completed.contains(position))
+          .ifPresent(position -> {
+            recovery.pendingBreak = position;
+            recovery.clearedTicks = 0;
+          });
+        path.onStopped(reason, cause);
+      }
+      activeTargets = Set.of();
+    }
+
     private void startNearbyBreak(DirectBreakTarget target) {
       activeNearbyTarget = target;
+      recovery.observedPosition = target.position();
       activeNearbyBreak = new BlockBreakAction(
         target.position(),
         target.face()
@@ -481,7 +573,7 @@ public final class CollectBlocksTaskProvider
         return;
       }
       if (blockBreak.isRejected(context.bot())) {
-        rejectedTargets.add(target.position());
+        recovery.rejectedTargets.add(target.position());
         clearNearbyBreak(true);
         context.reportProgress(progress(
           "Skipping a nearby block rejected by the server",
@@ -491,7 +583,7 @@ public final class CollectBlocksTaskProvider
       }
       if (blockBreak.isCompleted(context.bot())) {
         if (blockBreak.breakAttempted()) {
-          blocksBroken++;
+          recovery.blocksBroken++;
           context.reportProgress(progress(
             "Nearby matching block mined",
             CollectBlocksTaskProgressDetail.Phase.PHASE_BREAKING_BLOCK
@@ -506,7 +598,7 @@ public final class CollectBlocksTaskProvider
         activeNearbyBreakTicks
           > blockBreak.getAllowedTicks() + 20
       ) {
-        rejectedTargets.add(target.position());
+        recovery.rejectedTargets.add(target.position());
         clearNearbyBreak(true);
         context.reportProgress(progress(
           "Skipping a nearby block that could not be mined",
@@ -523,9 +615,9 @@ public final class CollectBlocksTaskProvider
       if (!path.isDone()) {
         path.tick();
         var confirmedBreaks = confirmedBreaks(path);
-        var remaining = targetCount - blocksBroken;
+        var remaining = targetCount - recovery.blocksBroken;
         if (confirmedBreaks >= remaining) {
-          blocksBroken = targetCount;
+          recovery.blocksBroken = targetCount;
           activeTargets = Set.of();
           activePath = null;
           path.completeEarly();
@@ -568,10 +660,10 @@ public final class CollectBlocksTaskProvider
           ));
           return;
         }
-        consecutiveStalledPaths = 0;
-        blocksBroken += (int) Math.min(
+        recovery.consecutiveStalledPaths = 0;
+        recovery.blocksBroken += (int) Math.min(
           confirmedBreaks,
-          targetCount - blocksBroken
+          targetCount - recovery.blocksBroken
         );
         context.reportProgress(progress(
           "Matching block mined",
@@ -579,16 +671,16 @@ public final class CollectBlocksTaskProvider
         ));
       } catch (CompletionException exception) {
         var confirmedBreaks = confirmedBreaks(path);
-        blocksBroken += (int) Math.min(
+        recovery.blocksBroken += (int) Math.min(
           confirmedBreaks,
-          targetCount - blocksBroken
+          targetCount - recovery.blocksBroken
         );
         if (confirmedBreaks > 0) {
-          consecutiveStalledPaths = 0;
+          recovery.consecutiveStalledPaths = 0;
         }
         var failedTargets = activeTargets;
         activeTargets = Set.of();
-        if (blocksBroken >= targetCount) {
+        if (recovery.blocksBroken >= targetCount) {
           complete(
             CollectBlocksCompletionReason
               .COLLECT_BLOCKS_COMPLETION_REASON_TARGET_REACHED
@@ -600,7 +692,7 @@ public final class CollectBlocksTaskProvider
           : exception.getCause();
         path.onStopped(ControlStopReason.FAILED, cause);
         if (cause instanceof UnreachableGoalException) {
-          rejectedTargets.addAll(failedTargets);
+          recovery.rejectedTargets.addAll(failedTargets);
           if (!reachedStalledPathLimit()) {
             context.reportProgress(progress(
               "Trying another matching block after route planning failed",
@@ -617,7 +709,7 @@ public final class CollectBlocksTaskProvider
         if (
           cause instanceof BlockBreakRejectedException rejection
         ) {
-          rejectedTargets.add(rejection.blockPosition());
+          recovery.rejectedTargets.add(rejection.blockPosition());
           reachedStalledPathLimit();
           context.reportProgress(progress(
             "Skipping a matching block rejected by the server",
@@ -626,7 +718,7 @@ public final class CollectBlocksTaskProvider
           return;
         }
         if (cause instanceof BlockPlaceRejectedException) {
-          rejectedTargets.addAll(failedTargets);
+          recovery.rejectedTargets.addAll(failedTargets);
           reachedStalledPathLimit();
           context.reportProgress(progress(
             "Skipping targets whose route requires a rejected placement",
@@ -639,8 +731,8 @@ public final class CollectBlocksTaskProvider
     }
 
     private boolean reachedStalledPathLimit() {
-      consecutiveStalledPaths++;
-      return consecutiveStalledPaths >= MAX_CONSECUTIVE_STALLED_PATHS;
+      recovery.consecutiveStalledPaths++;
+      return recovery.consecutiveStalledPaths >= MAX_CONSECUTIVE_STALLED_PATHS;
     }
 
     private boolean rejectStalledAdjacentPositions(
@@ -658,8 +750,8 @@ public final class CollectBlocksTaskProvider
         playerPosition
       )) {
         rejectedAny |= recordFailedApproach(
-          rejectedAdjacentPositions,
-          rejectedTargets,
+          recovery.rejectedAdjacentPositions,
+          recovery.rejectedTargets,
           target,
           playerPosition
         );
@@ -713,7 +805,7 @@ public final class CollectBlocksTaskProvider
         ))
         .filter(position -> hasRequiredLineOfSight(
           requireLineOfSight,
-          rejectedAdjacentPositions.containsKey(position),
+          recovery.rejectedAdjacentPositions.containsKey(position),
           () -> hasLineOfSight(
             level,
             player.getEyePosition(),
@@ -797,14 +889,14 @@ public final class CollectBlocksTaskProvider
       if (hasHarvestableTarget) {
         return false;
       }
-      blocksBroken += (int) Math.min(
+      recovery.blocksBroken += (int) Math.min(
         confirmedBreaks(path),
-        targetCount - blocksBroken
+        targetCount - recovery.blocksBroken
       );
       activePath = null;
       activeTargets = Set.of();
       path.onStopped(ControlStopReason.CANCELLED, null);
-      if (blocksBroken >= targetCount) {
+      if (recovery.blocksBroken >= targetCount) {
         complete(
           CollectBlocksCompletionReason
             .COLLECT_BLOCKS_COMPLETION_REASON_TARGET_REACHED
@@ -832,7 +924,7 @@ public final class CollectBlocksTaskProvider
       if (!isWithinTargetY(position.getY(), targetYRange)) {
         return false;
       }
-      if (rejectedTargets.contains(SFVec3i.fromInt(position))) {
+      if (recovery.rejectedTargets.contains(SFVec3i.fromInt(position))) {
         return false;
       }
       var blockId = BuiltInRegistries.BLOCK
@@ -862,7 +954,7 @@ public final class CollectBlocksTaskProvider
     ) {
       var detail = CollectBlocksTaskProgressDetail.newBuilder()
         .setPhase(phase)
-        .setConsecutiveStalledPaths(consecutiveStalledPaths);
+        .setConsecutiveStalledPaths(recovery.consecutiveStalledPaths);
       var player = context.bot().minecraft().player;
       var level = context.bot().minecraft().level;
       if (player != null && level != null) {
@@ -872,8 +964,8 @@ public final class CollectBlocksTaskProvider
           dimension
         ));
         detail.addAllActiveTargets(positions(activeTargets, dimension));
-        detail.addAllRejectedTargets(positions(rejectedTargets, dimension));
-        rejectedAdjacentPositions.entrySet().stream()
+        detail.addAllRejectedTargets(positions(recovery.rejectedTargets, dimension));
+        recovery.rejectedAdjacentPositions.entrySet().stream()
           .sorted(Map.Entry.comparingByKey(positionComparator()))
           .map(entry -> CollectBlocksTaskProgressDetail.FailedApproach
             .newBuilder()
@@ -902,11 +994,11 @@ public final class CollectBlocksTaskProvider
       }
       return BotTaskProgress.newBuilder()
         .setMessage(message)
-        .setCurrent(blocksBroken)
+        .setCurrent(recovery.blocksBroken)
         .setTotal(targetCount)
         .setFraction(Math.min(
           1.0,
-          (double) blocksBroken / targetCount
+          (double) recovery.blocksBroken / targetCount
         ))
         .setDetail(Any.pack(detail.build()))
         .build();
@@ -948,7 +1040,7 @@ public final class CollectBlocksTaskProvider
       var level = context.bot().minecraft().level;
       var builder = CollectBlocksTaskResult.newBuilder()
         .setReason(reason)
-        .setBlocksBroken(blocksBroken);
+        .setBlocksBroken(recovery.blocksBroken);
       if (player != null && level != null) {
         builder.setFinalPosition(WorldPosition.newBuilder()
           .setX(player.getX())
@@ -975,39 +1067,43 @@ public final class CollectBlocksTaskProvider
     }
 
     @Override
-    public void onSuspended() {
-      clearNearbyBreak(true);
-      if (activePath != null) {
-        activePath.onSuspended();
+    public void onStarted() {
+      if (recovery.dimension == null) {
+        recovery.dimension = Objects.requireNonNull(context.bot().minecraft().level).dimension().identifier().toString();
+        recovery.observedPosition = SFVec3i.fromInt(Objects.requireNonNull(context.bot().minecraft().player).blockPosition());
       }
+      active = true;
+    }
+
+    @Override
+    public void onSuspended() {
+      checkpointNearbyBreak();
+      // Resume with a fresh route after accounting for work the old route already confirmed.
+      stopPath(ControlStopReason.CANCELLED, null);
+      clearNearbyBreak(true);
+      recoveryPending = true;
+      active = false;
     }
 
     @Override
     public void onResumed() {
-      if (activePath != null) {
-        activePath.onResumed();
-      }
+      active = true;
     }
 
     @Override
-    public void onStopped(
-      ControlStopReason reason,
-      @Nullable Throwable cause
-    ) {
-      clearNearbyBreak(reason != ControlStopReason.COMPLETED);
-      var path = activePath;
-      activePath = null;
-      activeTargets = Set.of();
-      if (path != null) {
-        path.onStopped(reason, cause);
-      }
-      if (reason != ControlStopReason.COMPLETED && !result.isDone()) {
-        result.cancel(true);
+    public void onStopped(ControlStopReason reason, @Nullable Throwable cause) {
+      try {
+        checkpointNearbyBreak();
+        stopPath(reason, cause);
+        clearNearbyBreak(reason != ControlStopReason.COMPLETED);
+      } finally {
+        active = false;
+        if (reason != ControlStopReason.COMPLETED && !result.isDone()) result.cancel(true);
       }
     }
 
     private void clearNearbyBreak(boolean stopDestroying) {
-      if (stopDestroying) {
+      if (stopDestroying && active) {
         var gameMode = context.bot().minecraft().gameMode;
         if (gameMode != null) {
           gameMode.stopDestroyBlock();
@@ -1023,6 +1119,17 @@ public final class CollectBlocksTaskProvider
     public String description() {
       return "Collect blocks";
     }
+  }
+
+  private static final class RecoveryState {
+    private final Set<SFVec3i> rejectedTargets = new HashSet<>();
+    private final Map<SFVec3i, Set<SFVec3i>> rejectedAdjacentPositions = new HashMap<>();
+    private int blocksBroken;
+    private int consecutiveStalledPaths;
+    private @Nullable String dimension;
+    private @Nullable SFVec3i pendingBreak;
+    private @Nullable SFVec3i observedPosition;
+    private int clearedTicks;
   }
 
   private record DirectBreakTarget(
