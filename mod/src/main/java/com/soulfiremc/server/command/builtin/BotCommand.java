@@ -23,9 +23,10 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
-import com.soulfiremc.server.bot.BotConnection;
+import com.soulfiremc.server.account.MinecraftAccount;
 import com.soulfiremc.server.command.CommandSourceStack;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -47,13 +48,13 @@ public final class BotCommand {
               helpSingleRedirect(
                 "Run a command for specific bots. Separate bot names with commas.",
                 c -> {
-                  var botNames = Set.of(StringArgumentType.getString(c, "bot_names").split(","));
+                  var botNames = Set.copyOf(List.of(StringArgumentType.getString(c, "bot_names").split(",")));
                   return c.getSource()
                     .withBotIds(c.getSource()
-                      .getGlobalVisibleBots()
+                      .getGlobalVisibleAccounts()
                       .stream()
-                      .filter(bot -> botNames.contains(bot.accountName()))
-                      .map(BotConnection::accountProfileId)
+                      .filter(account -> botNames.contains(account.lastKnownName()))
+                      .map(MinecraftAccount::profileId)
                       .collect(Collectors.toSet()));
                 }
               ),
@@ -66,7 +67,8 @@ public final class BotCommand {
 
     @Override
     public CompletableFuture<Suggestions> getSuggestions(CommandContext<CommandSourceStack> c, SuggestionsBuilder b) {
-      c.getSource().getGlobalVisibleBots().forEach(bot -> b.suggest(bot.accountName()));
+      c.getSource().getGlobalVisibleAccounts().forEach(account ->
+        b.suggest(StringArgumentType.escapeIfRequired(account.lastKnownName())));
 
       return b.buildFuture();
     }

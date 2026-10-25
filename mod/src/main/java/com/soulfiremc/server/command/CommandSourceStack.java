@@ -19,6 +19,7 @@ package com.soulfiremc.server.command;
 
 import com.soulfiremc.server.InstanceManager;
 import com.soulfiremc.server.SoulFireServer;
+import com.soulfiremc.server.account.MinecraftAccount;
 import com.soulfiremc.server.bot.BotConnection;
 import com.soulfiremc.server.database.UserRole;
 import com.soulfiremc.server.user.SoulFireUser;
@@ -92,6 +93,18 @@ public record CommandSourceStack(
       .filter(bot -> botIds == null || botIds
         .stream()
         .anyMatch(bot.accountProfileId()::equals))
+      .toList();
+  }
+
+  public List<MinecraftAccount> getInstanceVisibleAccounts(InstanceManager instance) {
+    return instance.settingsSource().accounts().values().stream()
+      .filter(account -> botIds == null || botIds.contains(account.profileId()))
+      .toList();
+  }
+
+  public List<MinecraftAccount> getGlobalVisibleAccounts() {
+    return getVisibleInstances().stream()
+      .flatMap(instance -> getInstanceVisibleAccounts(instance).stream())
       .toList();
   }
 

@@ -20,6 +20,7 @@ package com.soulfiremc.server.command.builtin;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
 import com.soulfiremc.grpc.generated.BotDesiredState;
+import com.soulfiremc.server.account.MinecraftAccount;
 import com.soulfiremc.server.command.CommandSourceStack;
 
 import static com.soulfiremc.server.command.brigadier.BrigadierHelper.forEveryInstance;
@@ -35,11 +36,11 @@ public final class BotsCommand {
       literal("bots")
         .then(literal("start")
           .executes(help(
-            "Set every configured bot in the selected instances to running",
+            "Set the selected configured bots to running",
             context -> setDesiredState(context, BotDesiredState.BOT_DESIRED_STATE_RUNNING))))
         .then(literal("stop")
           .executes(help(
-            "Set every configured bot in the selected instances to stopped",
+            "Set the selected configured bots to stopped",
             context -> setDesiredState(context, BotDesiredState.BOT_DESIRED_STATE_STOPPED)))));
   }
 
@@ -47,9 +48,16 @@ public final class BotsCommand {
     com.mojang.brigadier.context.CommandContext<CommandSourceStack> context,
     BotDesiredState desiredState) {
     return forEveryInstance(context, instance -> {
+      var botIds = context.getSource().getInstanceVisibleAccounts(instance).stream()
+        .map(MinecraftAccount::profileId)
+        .toList();
+      if (botIds.isEmpty()) {
+        context.getSource().source().sendWarn("No configured bots matched.");
+        return 0;
+      }
       instance.botStateManager().setDesiredState(
         context.getSource().source(),
-        instance.settingsSource().accounts().keySet(),
+        botIds,
         desiredState);
       return Command.SINGLE_SUCCESS;
     });
