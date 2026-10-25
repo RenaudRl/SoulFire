@@ -244,9 +244,15 @@ export class ReflectivePlugin {
           ),
         );
       }
-      const inputSchema = this.#message(task.inputTypeUrl);
-      const resultSchema = this.#message(task.resultTypeUrl);
-      const value = fromJson(inputSchema, input, { registry: this.registry });
+      const { inputSchema, resultSchema, value } = yield* Effect.try({
+        try: () => {
+          const inputSchema = this.#message(task.inputTypeUrl);
+          const resultSchema = this.#message(task.resultTypeUrl);
+          const value = fromJson(inputSchema, input, { registry: this.registry });
+          return { inputSchema, resultSchema, value };
+        },
+        catch: (cause) => operationError("ReflectivePlugin.startTask", cause),
+      });
       return yield* tasks.start(
         inputSchema,
         value as MessageInitShape<typeof inputSchema>,
