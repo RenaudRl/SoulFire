@@ -45,6 +45,8 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockedStatic;
 
@@ -57,6 +59,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -88,6 +91,9 @@ class ExcavateRecoveryTest {
       second.control().onStopped(ControlStopReason.CANCELLED, null);
       var result = fixture.finish(fixture.start(factory));
       var expected = maximumBlocks == 0 ? 5 : maximumBlocks;
+      assertEquals(maximumBlocks == 0
+        ? ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_AREA_CLEARED
+        : ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_BLOCK_LIMIT_REACHED, result.getReason());
       assertEquals(expected, result.getBlocksBroken());
       assertEquals(12, result.getBlocksSkipped());
       assertEquals(0, result.getUnreachableBlocks());
@@ -103,8 +109,8 @@ class ExcavateRecoveryTest {
   }
 
   @ParameterizedTest
-  @ValueSource(ints = {Integer.MAX_VALUE, Integer.MIN_VALUE, -1})
-  void acceptsTheFullUnsignedBlockLimit(int maximumBlocks) throws Exception {
+  @ValueSource(ints = {5, Integer.MAX_VALUE, Integer.MIN_VALUE, -1})
+  void clearsTheRegionWhenTheLimitIncludesEveryBlock(int maximumBlocks) throws Exception {
     try (var fixture = new Fixture()) {
       var result = fixture.finish(fixture.start(fixture.factory(maximumBlocks)));
       assertEquals(ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_AREA_CLEARED, result.getReason());
@@ -131,30 +137,37 @@ class ExcavateRecoveryTest {
   }
 
   @ParameterizedTest
-  @ValueSource(booleans = {false, true})
-  void retainsConfirmedUnreachableWorkWithoutRetryingIt(boolean allUnreachable) throws Exception {
+  @MethodSource("unreachableCases")
+  void retainsConfirmedUnreachableWorkWithoutRetryingIt(int maximumBlocks, boolean allUnreachable) throws Exception {
     try (var fixture = new Fixture()) {
       var failedTarget = new BlockPos(0, 64, 0);
       fixture.failures.add(failedTarget);
       if (allUnreachable) {
-        fixture.failures.add(new BlockPos(4, 64, 0));
-        fixture.failures.add(new BlockPos(8, 64, 0));
+        fixture.failures.addAll(fixture.blocks.keySet());
       }
-      var factory = fixture.factory(3);
+      var factory = fixture.factory(maximumBlocks);
       var first = fixture.start(factory);
       fixture.until(first, () -> fixture.progress.getCurrent() == 1);
       first.control().onStopped(ControlStopReason.CANCELLED, null);
       var result = fixture.finish(fixture.start(factory));
-      assertEquals(allUnreachable ? 0 : 2, result.getBlocksBroken());
-      assertEquals(allUnreachable ? 3 : 1, result.getUnreachableBlocks());
-      assertEquals(allUnreachable
-        ? ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_NO_REACHABLE_BLOCKS
-        : ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_BLOCK_LIMIT_REACHED, result.getReason());
+      var selected = maximumBlocks == 0 ? 5 : maximumBlocks;
+      var unreachable = allUnreachable ? selected : 1;
+      assertEquals(selected - unreachable, result.getBlocksBroken());
+      assertEquals(selected - unreachable, fixture.removed);
+      assertEquals(unreachable, result.getUnreachableBlocks());
+      assertEquals(ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_NO_REACHABLE_BLOCKS, result.getReason());
       assertEquals(1, fixture.attempts.get(failedTarget));
-      assertEquals(3, fixture.progress.getCurrent());
-      assertEquals(3, fixture.progress.getTotal());
+      assertEquals(selected, fixture.progress.getCurrent());
+      assertEquals(selected, fixture.progress.getTotal());
       assertEquals(1.0, fixture.progress.getFraction());
     }
+  }
+
+  static Stream<Arguments> unreachableCases() {
+    return Stream.of(
+      Arguments.of(0, false), Arguments.of(0, true),
+      Arguments.of(3, false), Arguments.of(3, true)
+    );
   }
 
   @Test

@@ -333,7 +333,7 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
         return;
       }
       if (recovery.pending.isEmpty()) {
-        complete(recovery.unreachable > 0 && recovery.blocksBroken == 0
+        complete(recovery.unreachable > 0
           ? ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_NO_REACHABLE_BLOCKS
           : region().limited()
             ? ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_BLOCK_LIMIT_REACHED
