@@ -758,14 +758,19 @@ public final class ScriptServiceImpl extends ScriptServiceGrpc.ScriptServiceImpl
         }
       });
 
-      var serverObserver = (ServerCallStreamObserver<ScriptLogEntry>) responseObserver;
-
-      // TODO: Implement log subscription via the logging system
-      // This would hook into SFLogAppender to filter logs by script ID
-      // For now, we just keep the stream open until cancelled
-
-      serverObserver.setOnCancelHandler(() ->
-        log.debug("Script log subscription cancelled for script {}", scriptId));
+      var scope = LogScope.newBuilder().setInstanceScript(InstanceScriptLogScope.newBuilder()
+        .setInstanceId(instanceId.toString()).setScriptId(scriptId.toString())).build();
+      LogServiceImpl.subscribe(soulFireServer, scope, (ServerCallStreamObserver<ScriptLogEntry>) responseObserver,
+        (event, _) -> ScriptLogEntry.newBuilder()
+          .setScriptId(scriptId.toString())
+          .setMessage(event.message())
+          .setTimestamp(Timestamps.fromMillis(event.timestamp()))
+          .setLevel(switch (event.level()) {
+            case "TRACE", "DEBUG" -> LogLevel.LOG_LEVEL_DEBUG;
+            case "WARN" -> LogLevel.LOG_LEVEL_WARN;
+            case "ERROR", "FATAL" -> LogLevel.LOG_LEVEL_ERROR;
+            case null, default -> LogLevel.LOG_LEVEL_INFO;
+          }).build());
 
     } catch (StatusRuntimeException e) {
       throw e;

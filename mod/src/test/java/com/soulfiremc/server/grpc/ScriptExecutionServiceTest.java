@@ -36,12 +36,15 @@ import com.soulfiremc.grpc.generated.GetScriptRequest;
 import com.soulfiremc.grpc.generated.GetScriptResponse;
 import com.soulfiremc.grpc.generated.GetScriptStatusRequest;
 import com.soulfiremc.grpc.generated.GetScriptStatusResponse;
+import com.soulfiremc.grpc.generated.LogLevel;
 import com.soulfiremc.grpc.generated.PortType;
 import com.soulfiremc.grpc.generated.Position;
 import com.soulfiremc.grpc.generated.ScriptEdge;
 import com.soulfiremc.grpc.generated.ScriptEvent;
+import com.soulfiremc.grpc.generated.ScriptLogEntry;
 import com.soulfiremc.grpc.generated.ScriptNode;
 import com.soulfiremc.grpc.generated.ScriptQuotas;
+import com.soulfiremc.grpc.generated.SubscribeScriptLogsRequest;
 import com.soulfiremc.grpc.generated.UpdateScriptRequest;
 import com.soulfiremc.grpc.generated.UpdateScriptResponse;
 import com.soulfiremc.grpc.generated.ValidateScriptRequest;
@@ -59,6 +62,7 @@ import com.soulfiremc.server.script.PortDefinition;
 import com.soulfiremc.server.script.nodes.NodeRegistry;
 import com.soulfiremc.server.settings.lib.InstanceSettingsImpl;
 import com.soulfiremc.server.user.AuthSystem;
+import com.soulfiremc.server.user.PermissionContext;
 import com.soulfiremc.server.user.SoulFireUser;
 import com.soulfiremc.server.util.structs.GsonInstance;
 import com.soulfiremc.shared.SFLogAppender;
@@ -89,7 +93,9 @@ import tools.jackson.databind.json.JsonMapper;
 import java.net.http.HttpRequest;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -97,6 +103,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -1011,4 +1018,125 @@ final class ScriptExecutionServiceTest {
     assertTrue(saved.getScript().getPaused());
   }
 
+
+  @Test
+  void scriptLogSubscriptionFiltersScopeAndPreservesMetadata() throws Exception {
+    try (var logs = new ScriptLogFixture()) {
+      var viewer = logs.subscribe();
+      logs.holder.broadcastLogMessage(logs.event(UUID.randomUUID(), logs.id, "INFO"));
+      logs.holder.broadcastLogMessage(logs.event(logs.instance, UUID.randomUUID(), "INFO"));
+      logs.holder.sendPersonalMessage(logs.owner, "personal");
+      for (var level : List.of("DEBUG", "INFO", "WARN", "ERROR"))
+        logs.holder.broadcastLogMessage(logs.event(logs.instance, logs.id, level));
+      assertEquals(List.of(LogLevel.LOG_LEVEL_DEBUG, LogLevel.LOG_LEVEL_INFO,
+        LogLevel.LOG_LEVEL_WARN, LogLevel.LOG_LEVEL_ERROR), viewer.messages.stream().map(ScriptLogEntry::getLevel).toList());
+      for (var entry : viewer.messages) {
+        assertEquals(logs.id.toString(), entry.getScriptId());
+        assertEquals("script entry", entry.getMessage());
+        assertEquals(1234, entry.getTimestamp().getSeconds());
+        assertEquals(567_000_000, entry.getTimestamp().getNanos());
+      }
+    }
+  }
+
+  @Test
+  void scriptLogSubscriptionRechecksQueuedPermissions() throws Exception {
+    try (var logs = new ScriptLogFixture()) {
+      var viewer = logs.subscribe();
+      viewer.ready.set(false);
+      logs.holder.broadcastLogMessage(logs.event(logs.instance, logs.id, "INFO"));
+      when(logs.user.hasPermission(any(PermissionContext.class))).thenReturn(false);
+      viewer.ready.set(true);
+      viewer.onReady.get().run();
+      assertTrue(viewer.messages.isEmpty());
+      when(logs.user.hasPermission(any(PermissionContext.class))).thenReturn(true);
+      logs.holder.broadcastLogMessage(logs.event(logs.instance, logs.id, "WARN"));
+      assertEquals(1, viewer.messages.size());
+    }
+  }
+
+  @Test
+  void cancellingScriptLogsClearsPendingMessagesWithoutDisconnectingOtherViewers() throws Exception {
+    try (var logs = new ScriptLogFixture()) {
+      var cancelled = logs.subscribe();
+      var healthy = logs.subscribe();
+      cancelled.ready.set(false);
+      logs.holder.broadcastLogMessage(logs.event(logs.instance, logs.id, "INFO"));
+      cancelled.onCancel.get().run();
+      cancelled.ready.set(true);
+      cancelled.onReady.get().run();
+      logs.holder.broadcastLogMessage(logs.event(logs.instance, logs.id, "WARN"));
+      assertTrue(cancelled.messages.isEmpty());
+      assertEquals(2, healthy.messages.size());
+      logs.holder.disconnect(logs.owner);
+      verify(healthy.observer).onCompleted();
+      verify(cancelled.observer, never()).onCompleted();
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void scriptLogSubscriptionRejectsMissingOrForeignScripts(boolean foreignInstance) throws Exception {
+    try (var logs = new ScriptLogFixture()) {
+      var request = SubscribeScriptLogsRequest.newBuilder()
+        .setInstanceId(foreignInstance ? UUID.randomUUID().toString() : instanceId)
+        .setScriptId(foreignInstance ? logs.id.toString() : UUID.randomUUID().toString()).build();
+      var failure = assertThrows(StatusRuntimeException.class, () ->
+        rpcContext.run(() -> service.subscribeScriptLogs(request, mock())));
+      assertEquals(Status.Code.NOT_FOUND, failure.getStatus().getCode());
+    }
+  }
+
+  private final class ScriptLogFixture implements AutoCloseable {
+    final UUID instance = UUID.fromString(instanceId);
+    final UUID owner = UUID.randomUUID();
+    final SoulFireUser user = rpcContext.call(ServerRPCConstants.USER_CONTEXT_KEY::get);
+    final UUID id;
+    final LogServiceImpl.StateHolder holder;
+    final Consumer<SFLogAppender.SFLogEvent> consumer;
+
+    ScriptLogFixture() throws Exception {
+      var before = new HashSet<>(SFLogAppender.INSTANCE.logConsumers());
+      holder = new LogServiceImpl.StateHolder();
+      consumer = SFLogAppender.INSTANCE.logConsumers().stream().filter(c -> !before.contains(c)).findFirst().orElseThrow();
+      when(server.logStateHolder()).thenReturn(holder);
+      var auth = mock(AuthSystem.class);
+      var issued = Instant.now();
+      when(server.authSystem()).thenReturn(auth);
+      when(user.getUniqueId()).thenReturn(owner);
+      when(user.getIssuedAt()).thenReturn(issued);
+      when(user.hasPermission(any(PermissionContext.class))).thenReturn(true);
+      when(auth.authenticateBySubject(owner, issued)).thenReturn(Optional.of(user));
+      id = UUID.fromString(saveScript("action.print"));
+    }
+
+    ScriptLogViewer subscribe() {
+      var viewer = new ScriptLogViewer();
+      rpcContext.run(() -> service.subscribeScriptLogs(SubscribeScriptLogsRequest.newBuilder()
+        .setInstanceId(instanceId).setScriptId(id.toString()).build(), viewer.observer));
+      return viewer;
+    }
+
+    SFLogAppender.SFLogEvent event(UUID eventInstance, UUID eventScript, String level) {
+      return new SFLogAppender.SFLogEvent(UUID.randomUUID().toString(), "script entry", 1_234_567,
+        level, "script", eventInstance, null, eventScript, null, null);
+    }
+
+    @Override public void close() { SFLogAppender.INSTANCE.logConsumers().remove(consumer); }
+  }
+
+  private static final class ScriptLogViewer {
+    final ServerCallStreamObserver<ScriptLogEntry> observer = mock();
+    final List<ScriptLogEntry> messages = new ArrayList<>();
+    final AtomicBoolean ready = new AtomicBoolean(true);
+    final AtomicReference<Runnable> onReady = new AtomicReference<>(() -> {});
+    final AtomicReference<Runnable> onCancel = new AtomicReference<>();
+
+    ScriptLogViewer() {
+      when(observer.isReady()).thenAnswer(_ -> ready.get());
+      doAnswer(call -> { messages.add(call.getArgument(0)); return null; }).when(observer).onNext(any());
+      doAnswer(call -> { onReady.set(call.getArgument(0)); return null; }).when(observer).setOnReadyHandler(any());
+      doAnswer(call -> { onCancel.set(call.getArgument(0)); return null; }).when(observer).setOnCancelHandler(any());
+    }
+  }
 }
