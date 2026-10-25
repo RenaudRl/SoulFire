@@ -50,6 +50,7 @@ import com.soulfiremc.server.pathfinding.graph.constraint.BlockBreakBlacklistCon
 import com.soulfiremc.server.pathfinding.graph.constraint.PathConstraint;
 import com.soulfiremc.server.util.SFBlockHelpers;
 import io.grpc.Status;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -60,6 +61,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -76,6 +78,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.function.BiPredicate;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
@@ -306,6 +309,38 @@ public final class CollectBlocksTaskProvider
     return !requireLineOfSight
       || previouslyAttempted
       || lineOfSight.getAsBoolean();
+  }
+
+  static Set<SFVec3i> scanCandidates(
+    ClientLevel level, BlockPos origin, int searchRadius, BiPredicate<BlockPos, BlockState> matches
+  ) {
+    var radiusSquared = searchRadius * searchRadius;
+    var minimumY = Math.max(level.getMinY(), origin.getY() - searchRadius);
+    var maximumY = Math.min(level.getMaxY() - 1, origin.getY() + searchRadius);
+    var candidates = new HashSet<SFVec3i>();
+    var chunks = level.getChunkSource();
+    for (var chunkX = (origin.getX() - searchRadius) >> 4; chunkX <= (origin.getX() + searchRadius) >> 4; chunkX++) {
+      for (var chunkZ = (origin.getZ() - searchRadius) >> 4; chunkZ <= (origin.getZ() + searchRadius) >> 4; chunkZ++) {
+        var chunk = chunks.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        if (chunk == null) continue;
+        var minX = Math.max(origin.getX() - searchRadius, chunkX << 4);
+        var maxX = Math.min(origin.getX() + searchRadius, (chunkX << 4) + 15);
+        var minZ = Math.max(origin.getZ() - searchRadius, chunkZ << 4);
+        var maxZ = Math.min(origin.getZ() + searchRadius, (chunkZ << 4) + 15);
+        for (var sectionY = minimumY >> 4; sectionY <= maximumY >> 4; sectionY++) {
+          var section = chunk.getSection(level.getSectionIndexFromSectionY(sectionY));
+          if (section.hasOnlyAir()) continue;
+          var minY = Math.max(minimumY, sectionY << 4);
+          var maxY = Math.min(maximumY, (sectionY << 4) + 15);
+          for (var position : BlockPos.betweenClosed(minX, minY, minZ, maxX, maxY, maxZ)) {
+            if (position.distSqr(origin) > radiusSquared) continue;
+            var state = section.getBlockState(position.getX() & 15, position.getY() & 15, position.getZ() & 15);
+            if (!state.isAir() && matches.test(position, state)) candidates.add(SFVec3i.fromInt(position));
+          }
+        }
+      }
+    }
+    return candidates;
   }
 
   static Comparator<SFVec3i> candidateComparator(BlockPos origin) {
@@ -773,31 +808,7 @@ public final class CollectBlocksTaskProvider
         return List.of();
       }
       var origin = player.blockPosition();
-      var radiusSquared = searchRadius * searchRadius;
-      var minimumY = Math.max(level.getMinY(), origin.getY() - searchRadius);
-      var maximumY = Math.min(level.getMaxY(), origin.getY() + searchRadius);
-      var candidates = new HashSet<SFVec3i>();
-      for (var x = -searchRadius; x <= searchRadius; x++) {
-        for (var z = -searchRadius; z <= searchRadius; z++) {
-          if (x * x + z * z > radiusSquared) {
-            continue;
-          }
-          for (var y = minimumY; y <= maximumY; y++) {
-            var offsetY = y - origin.getY();
-            if (x * x + offsetY * offsetY + z * z > radiusSquared) {
-              continue;
-            }
-            var position = origin.offset(x, offsetY, z);
-            if (!SFBlockHelpers.isChunkLoaded(level, position)) {
-              continue;
-            }
-            var state = level.getBlockState(position);
-            if (matches(position, state)) {
-              candidates.add(SFVec3i.fromInt(position));
-            }
-          }
-        }
-      }
+      var candidates = scanCandidates(level, origin, searchRadius, this::matches);
       return candidates.stream()
         .sorted(candidateComparator(origin))
         .filter(position -> canHarvest(

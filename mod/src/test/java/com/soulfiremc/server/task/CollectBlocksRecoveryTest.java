@@ -44,10 +44,13 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.NonNullList;
 import net.minecraft.world.inventory.InventoryMenu;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
@@ -74,6 +77,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
@@ -374,6 +378,30 @@ class CollectBlocksRecoveryTest {
       when(level.getMaxY()).thenReturn(320);
       when(level.getChunkSource()).thenReturn(chunks);
       when(chunks.hasChunk(anyInt(), anyInt())).thenAnswer(_ -> loaded);
+      when(level.getSectionIndexFromSectionY(anyInt())).thenAnswer(call -> (int) call.getArgument(0) + 4);
+      var chunkViews = new HashMap<ChunkPos, LevelChunk>();
+      var sectionViews = new HashMap<BlockPos, LevelChunkSection>();
+      when(chunks.getChunk(anyInt(), anyInt(), any(), anyBoolean())).thenAnswer(call -> {
+        if (!loaded) return null;
+        var chunkPos = new ChunkPos((int) call.getArgument(0), (int) call.getArgument(1));
+        return chunkViews.computeIfAbsent(chunkPos, p -> {
+          var chunk = mock(LevelChunk.class);
+          when(chunk.getSection(anyInt())).thenAnswer(sectionCall -> {
+            var key = new BlockPos(p.x(), (int) sectionCall.getArgument(0) - 4, p.z());
+            return sectionViews.computeIfAbsent(key, k -> {
+              var section = mock(LevelChunkSection.class);
+              when(section.hasOnlyAir()).thenAnswer(_ -> blocks.keySet().stream().noneMatch(b ->
+                b.getX() >> 4 == k.getX() && b.getY() >> 4 == k.getY() && b.getZ() >> 4 == k.getZ()));
+              when(section.getBlockState(anyInt(), anyInt(), anyInt())).thenAnswer(stateCall ->
+                blocks.getOrDefault(new BlockPos((k.getX() << 4) + (int) stateCall.getArgument(0),
+                  (k.getY() << 4) + (int) stateCall.getArgument(1), (k.getZ() << 4) + (int) stateCall.getArgument(2)),
+                  Blocks.AIR.defaultBlockState()));
+              return section;
+            });
+          });
+          return chunk;
+        });
+      });
       when(level.getBlockState(any())).thenAnswer(call -> blocks.getOrDefault(call.getArgument(0), Blocks.AIR.defaultBlockState()));
       when(level.getFluidState(any())).thenAnswer(call -> submerged.contains(((BlockPos) call.getArgument(0)).below())
         ? Fluids.WATER.defaultFluidState() : Fluids.EMPTY.defaultFluidState());
