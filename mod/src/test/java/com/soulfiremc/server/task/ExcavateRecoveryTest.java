@@ -39,6 +39,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -60,6 +62,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -249,6 +252,23 @@ class ExcavateRecoveryTest {
       when(level.getMaxY()).thenReturn(320);
       when(level.getChunkSource()).thenReturn(chunks);
       when(chunks.hasChunk(anyInt(), anyInt())).thenAnswer(_ -> loaded);
+      when(level.getSectionIndexFromSectionY(anyInt())).thenAnswer(call -> (int) call.getArgument(0) + 4);
+      when(chunks.getChunk(anyInt(), anyInt(), any(), anyBoolean())).thenAnswer(call -> {
+        if (!loaded) return null;
+        int chunkX = call.getArgument(0), chunkZ = call.getArgument(1);
+        var chunk = mock(LevelChunk.class);
+        when(chunk.getSection(anyInt())).thenAnswer(sectionCall -> {
+          var sectionY = (int) sectionCall.getArgument(0) - 4;
+          var section = mock(LevelChunkSection.class);
+          when(section.hasOnlyAir()).thenAnswer(_ -> blocks.keySet().stream().noneMatch(position ->
+            position.getX() >> 4 == chunkX && position.getY() >> 4 == sectionY && position.getZ() >> 4 == chunkZ));
+          when(section.getBlockState(anyInt(), anyInt(), anyInt())).thenAnswer(blockCall ->
+            blocks.getOrDefault(new BlockPos((chunkX << 4) + (int) blockCall.getArgument(0),
+              (sectionY << 4) + (int) blockCall.getArgument(1), (chunkZ << 4) + (int) blockCall.getArgument(2)), Blocks.AIR.defaultBlockState()));
+          return section;
+        });
+        return chunk;
+      });
       when(level.getBlockState(any())).thenAnswer(call -> blocks.getOrDefault(call.getArgument(0), Blocks.AIR.defaultBlockState()));
       when(player.blockPosition()).thenReturn(new BlockPos(0, 64, 0));
       minecraft.level = level;

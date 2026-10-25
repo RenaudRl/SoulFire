@@ -37,8 +37,10 @@ import com.soulfiremc.server.pathfinding.graph.constraint.DelegatePathConstraint
 import com.soulfiremc.server.pathfinding.graph.constraint.PathConstraint;
 import com.soulfiremc.server.util.SFBlockHelpers;
 import io.grpc.Status;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.util.Comparator;
@@ -123,7 +125,9 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
 
     var recovering = recovery.region != null;
     if (!recovering) {
-      recovery.region = selectRegion(context, input, minimum, maximum);
+      recovery.region = selectRegion(level,
+        Objects.requireNonNull(context.bot().minecraft().player).blockPosition(),
+        minimum, maximum, input.getMaximumBlocks());
       recovery.pending.addAll(recovery.region.selected());
     }
     var region = Objects.requireNonNull(recovery.region);
@@ -142,49 +146,58 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
     return new BotTaskExecution(control, result);
   }
 
-  private static Region selectRegion(
-    BotTaskContext context,
-    ExcavateTask input,
+  static Region selectRegion(
+    ClientLevel level,
+    BlockPos origin,
     BlockPos minimum,
-    BlockPos maximum
+    BlockPos maximum,
+    int maximumBlocks
   ) {
-    var level = Objects.requireNonNull(context.bot().minecraft().level);
-    var player = Objects.requireNonNull(
-      context.bot().minecraft().player,
-      "Bot player is not available"
-    );
     var allDiggable = new LinkedHashSet<SFVec3i>();
     var skipped = 0;
-    for (var x = minimum.getX(); x <= maximum.getX(); x++) {
-      for (var y = minimum.getY(); y <= maximum.getY(); y++) {
-        for (var z = minimum.getZ(); z <= maximum.getZ(); z++) {
-          var position = new BlockPos(x, y, z);
-          if (!SFBlockHelpers.isChunkLoaded(level, position)) {
-            throw Status.FAILED_PRECONDITION
-              .withDescription(
-                "Excavation cuboid contains an unloaded chunk at %d, %d"
-                  .formatted(position.getX() >> 4, position.getZ() >> 4)
-              )
-              .asRuntimeException();
+    var chunks = level.getChunkSource();
+    for (var chunkX = minimum.getX() >> 4; chunkX <= (maximum.getX() >> 4); chunkX++) {
+      for (var chunkZ = minimum.getZ() >> 4; chunkZ <= (maximum.getZ() >> 4); chunkZ++) {
+        var chunk = chunks.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        if (chunk == null) {
+          throw Status.FAILED_PRECONDITION
+            .withDescription("Excavation cuboid contains an unloaded chunk at %d, %d".formatted(chunkX, chunkZ))
+            .asRuntimeException();
+        }
+        var minX = Math.max(minimum.getX(), chunkX << 4);
+        var maxX = Math.min(maximum.getX(), (chunkX << 4) + 15);
+        var minZ = Math.max(minimum.getZ(), chunkZ << 4);
+        var maxZ = Math.min(maximum.getZ(), (chunkZ << 4) + 15);
+        for (var sectionY = minimum.getY() >> 4; sectionY <= (maximum.getY() >> 4); sectionY++) {
+          var section = chunk.getSection(level.getSectionIndexFromSectionY(sectionY));
+          var minY = Math.max(minimum.getY(), sectionY << 4);
+          var maxY = Math.min(maximum.getY(), (sectionY << 4) + 15);
+          if (section.hasOnlyAir()) {
+            skipped += (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+            continue;
           }
-          var state = level.getBlockState(position);
-          if (isDiggable(level, position, state)) {
-            allDiggable.add(SFVec3i.fromInt(position));
-          } else {
-            skipped++;
+          for (var position : BlockPos.betweenClosed(minX, minY, minZ, maxX, maxY, maxZ)) {
+            var state = section.getBlockState(position.getX() & 15, position.getY() & 15, position.getZ() & 15);
+            if (isDiggable(level, position, state)) {
+              allDiggable.add(SFVec3i.fromInt(position));
+            } else {
+              skipped++;
+            }
           }
         }
       }
     }
 
-    var limited = input.getMaximumBlocks() > 0
-      && allDiggable.size() > input.getMaximumBlocks();
+    var limited = maximumBlocks > 0
+      && allDiggable.size() > maximumBlocks;
     var selected = allDiggable.stream()
-      .sorted(Comparator.comparingDouble(position ->
-        position.toBlockPos().distSqr(player.blockPosition())))
-      .limit(input.getMaximumBlocks() == 0
+      .sorted(Comparator.comparingDouble((SFVec3i position) -> position.toBlockPos().distSqr(origin))
+        .thenComparingInt(position -> position.x)
+        .thenComparingInt(position -> position.y)
+        .thenComparingInt(position -> position.z))
+      .limit(maximumBlocks == 0
         ? allDiggable.size()
-        : input.getMaximumBlocks())
+        : maximumBlocks)
       .collect(
         java.util.stream.Collectors.toCollection(LinkedHashSet::new)
       );
@@ -261,7 +274,7 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
     };
   }
 
-  private record Region(
+  record Region(
     List<SFVec3i> selected,
     Set<SFVec3i> diggable,
     int skipped,
