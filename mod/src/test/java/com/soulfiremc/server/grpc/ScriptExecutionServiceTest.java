@@ -245,6 +245,11 @@ final class ScriptExecutionServiceTest {
       assertEquals(1, active.getActivationCount());
       result.tryEmitValue(Map.of());
       var finished = this.<GetScriptStatusResponse>rpcResponse(o -> service.getScriptStatus(request, o)).getStatus();
+      var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (finished.hasActiveNodeId() && System.nanoTime() - deadline < 0) {
+        Thread.sleep(10);
+        finished = this.<GetScriptStatusResponse>rpcResponse(o -> service.getScriptStatus(request, o)).getStatus();
+      }
       assertTrue(finished.getIsActive());
       assertFalse(finished.hasActiveNodeId());
       assertEquals(1, finished.getActivationCount());
