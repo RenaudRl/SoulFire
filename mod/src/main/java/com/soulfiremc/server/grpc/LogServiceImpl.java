@@ -116,8 +116,9 @@ public final class LogServiceImpl extends LogsServiceGrpc.LogsServiceImplBase {
     try {
       var userId = ServerRPCConstants.USER_CONTEXT_KEY.get().getUniqueId();
       var issuedAt = ServerRPCConstants.USER_CONTEXT_KEY.get().getIssuedAt();
+      var sessionVersion = ServerRPCConstants.USER_CONTEXT_KEY.get().getSessionVersion();
       var user = new CachedLazyObject<>((Supplier<Optional<SoulFireUser>>)
-        () -> server.authSystem().authenticateBySubject(userId, issuedAt), 1, TimeUnit.SECONDS);
+        () -> server.authSystem().authenticateBySubject(userId, issuedAt, sessionVersion), 1, TimeUnit.SECONDS);
       var predicate = eventPredicate(scope);
       new StateHolder.ConnectionMessageSender<>(
         server.logStateHolder(),

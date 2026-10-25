@@ -136,6 +136,7 @@ final class DatabaseManagerTest {
       expected.put("plugin_permission_grants", legacy.fetch("SELECT * FROM plugin_permission_grants WHERE user_id IN (?, ?) ORDER BY 1, 2",
         retained.owner(), removedInstance.owner()).intoMaps());
       assertFalse(legacy.fetch("PRAGMA foreign_key_check").isEmpty());
+      expected.get("users").forEach(row -> row.put("session_version", 0L));
     }
 
     try (var paths = mockStatic(SFPathConstants.class)) {

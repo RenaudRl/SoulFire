@@ -98,7 +98,7 @@ final class SdkProvisioningServiceTest {
       .set(Tables.INSTANCES.ICON, "pickaxe")
       .set(Tables.INSTANCES.SETTINGS, GsonInstance.CONFIG_GSON.toJson(InstanceSettingsImpl.Stem.EMPTY.serializeToTree()))
       .execute();
-    owner = auth.authenticateBySubject(ownerId, Instant.now()).orElseThrow();
+    owner = auth.authenticateBySubject(ownerId, Instant.now(), 0L).orElseThrow();
   }
 
   @AfterEach
@@ -118,7 +118,7 @@ final class SdkProvisioningServiceTest {
 
   @Test
   void readOnlyAccessAllowsReuseButCannotAddAnAccount() {
-    var root = auth.authenticateBySubject(AuthSystem.ROOT_USER_ID, Instant.now()).orElseThrow();
+    var root = auth.authenticateBySubject(AuthSystem.ROOT_USER_ID, Instant.now(), 0L).orElseThrow();
     var created = provision(root, "Builder");
     var readOnly = spy(owner);
     doReturn(TriState.FALSE).when(readOnly).getPermission(

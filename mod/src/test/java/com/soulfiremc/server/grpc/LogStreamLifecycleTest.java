@@ -293,7 +293,7 @@ final class LogStreamLifecycleTest {
       when(user.getUniqueId()).thenReturn(owner);
       when(user.getIssuedAt()).thenReturn(issuedAt);
       when(user.hasPermission(any(PermissionContext.class))).thenReturn(true);
-      when(auth.authenticateBySubject(owner, issuedAt)).thenReturn(Optional.of(user));
+      when(auth.authenticateBySubject(owner, issuedAt, 0L)).thenReturn(Optional.of(user));
       var name = InProcessServerBuilder.generateName();
       server = InProcessServerBuilder.forName(name).directExecutor().addService(ServerInterceptors.intercept(new LogServiceImpl(soulFireServer), new ServerInterceptor() {
         @Override public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {

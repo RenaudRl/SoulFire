@@ -22,8 +22,10 @@ import com.soulfiremc.server.api.SoulFireAPI;
 import com.soulfiremc.server.api.event.UserSessionsInvalidatedEvent;
 import com.soulfiremc.server.database.generated.Tables;
 import com.soulfiremc.server.util.PortHelper;
+import com.soulfiremc.server.util.RPCConstants;
 import com.soulfiremc.shared.SFLogAppender;
 import com.soulfiremc.test.utils.TestBootstrap;
+import io.jsonwebtoken.Jwts;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -33,6 +35,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -68,34 +71,56 @@ final class AuthSystemSessionInvalidationTest {
           .set(Tables.USERS.MIN_ISSUED_AT, LocalDateTime.ofInstant(issuedAt.minusSeconds(5), ZoneOffset.UTC))
           .execute();
         var auth = server.authSystem();
-        assertTrue(auth.authenticateBySubject(userId, issuedAt).isPresent());
+        assertTrue(auth.authenticateBySubject(userId, issuedAt, 0L).isPresent());
+        var originalToken = auth.generateJWT(auth.getUserData(userId).orElseThrow(), RPCConstants.API_AUDIENCE);
+        var legacyToken = Jwts.builder().signWith(server.jwtSecretKey())
+          .subject(userId.toString()).issuedAt(Date.from(Instant.now()))
+          .audience().add(RPCConstants.API_AUDIENCE).and().compact();
+        assertTrue(auth.authenticateByToken(legacyToken, RPCConstants.API_AUDIENCE).isPresent());
+        assertTrue(auth.authenticateByToken(originalToken, RPCConstants.API_AUDIENCE).isPresent());
         var events = new ArrayList<UserSessionsInvalidatedEvent>();
         var authenticatedDuringEvent = new ArrayList<Boolean>();
         Consumer<UserSessionsInvalidatedEvent> listener = event -> {
           if (event.soulFireServer() != server || !event.userId().equals(userId)) return;
           events.add(event);
-          authenticatedDuringEvent.add(auth.authenticateBySubject(userId, issuedAt).isPresent());
+          authenticatedDuringEvent.add(auth.authenticateBySubject(userId, issuedAt, 0L).isPresent());
         };
         SoulFireAPI.registerListener(UserSessionsInvalidatedEvent.class, listener);
         try {
           auth.invalidateSessions(userId);
-          assertFalse(auth.authenticateBySubject(userId, issuedAt).isPresent());
+          assertFalse(auth.authenticateBySubject(userId, issuedAt, 0L).isPresent());
           assertEquals(1, events.size());
           var revoked = events.getFirst();
           assertSame(server, revoked.soulFireServer());
           assertEquals(userId, revoked.userId());
           var cutoff = auth.getUserData(userId).orElseThrow().getMinIssuedAt()
             .toInstant(ZoneOffset.UTC).truncatedTo(ChronoUnit.SECONDS);
-          assertEquals(cutoff, revoked.minimumIssuedAt());
-          assertTrue(auth.authenticateBySubject(userId, cutoff).isPresent());
+          assertEquals(1L, revoked.minimumSessionVersion());
+          assertEquals(1L, auth.getUserData(userId).orElseThrow().getSessionVersion());
+          // Match JWT's issue second to the cutoff exactly, without depending on test timing.
+          assertFalse(auth.authenticateBySubject(userId, cutoff, 0L).isPresent());
+          assertTrue(auth.authenticateBySubject(userId, cutoff, 1L).isPresent());
+          assertFalse(auth.authenticateByToken(originalToken, RPCConstants.API_AUDIENCE).isPresent());
+          assertFalse(auth.authenticateByToken(legacyToken, RPCConstants.API_AUDIENCE).isPresent());
+          var freshToken = auth.generateJWT(auth.getUserData(userId).orElseThrow(), RPCConstants.API_AUDIENCE);
+          var freshUser = auth.authenticateByToken(freshToken, RPCConstants.API_AUDIENCE).orElseThrow();
+          assertEquals(1L, freshUser.getSessionVersion());
+          assertFalse(auth.authenticateByToken(freshToken, RPCConstants.WEBDAV_AUDIENCE).isPresent());
+
+          auth.invalidateSessions(userId);
+          assertEquals(2L, events.getLast().minimumSessionVersion());
+          assertFalse(auth.authenticateByToken(freshToken, RPCConstants.API_AUDIENCE).isPresent());
+          var newestToken = auth.generateJWT(auth.getUserData(userId).orElseThrow(), RPCConstants.API_AUDIENCE);
+          assertEquals(2L, auth.authenticateByToken(newestToken, RPCConstants.API_AUDIENCE)
+            .orElseThrow().getSessionVersion());
 
           auth.deleteUser(userId);
-          assertEquals(2, events.size());
-          assertEquals(Instant.MAX, events.getLast().minimumIssuedAt());
-          assertFalse(auth.authenticateBySubject(userId, cutoff).isPresent());
-          assertEquals(List.of(false, false), authenticatedDuringEvent);
+          assertEquals(3, events.size());
+          assertEquals(Long.MAX_VALUE, events.getLast().minimumSessionVersion());
+          assertFalse(auth.authenticateByToken(newestToken, RPCConstants.API_AUDIENCE).isPresent());
+          assertEquals(List.of(false, false, false), authenticatedDuringEvent);
           assertThrows(IllegalArgumentException.class, () -> auth.invalidateSessions(userId));
-          assertEquals(2, events.size());
+          assertEquals(3, events.size());
         } finally {
           SoulFireAPI.unregisterListener(UserSessionsInvalidatedEvent.class, listener);
         }

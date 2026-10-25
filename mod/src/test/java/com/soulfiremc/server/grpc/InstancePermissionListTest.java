@@ -116,13 +116,13 @@ final class InstancePermissionListTest {
       when(runtime.instanceSettingsPageRegistry()).thenReturn(new SettingsPageRegistry());
       when(bots.summary()).thenReturn(BotFleetSummary.getDefaultInstance());
     }
-    owner = auth.authenticateBySubject(ownerId, Instant.now()).orElseThrow();
+    owner = auth.authenticateBySubject(ownerId, Instant.now(), 0L).orElseThrow();
   }
 
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void listsVisibleProfilesWithoutQueryingOwnershipForEveryPermission(boolean admin) {
-    var user = admin ? auth.authenticateBySubject(AuthSystem.ROOT_USER_ID, Instant.now()).orElseThrow() : owner;
+    var user = admin ? auth.authenticateBySubject(AuthSystem.ROOT_USER_ID, Instant.now(), 0L).orElseThrow() : owner;
     queries.set(0);
     var response = list(user);
     assertEquals(admin ? 1 : ids.size() + 1, queries.get());
@@ -162,7 +162,7 @@ final class InstancePermissionListTest {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void skipsProfilesUntilTheirRuntimeIsAvailable(boolean admin) {
-    var user = admin ? auth.authenticateBySubject(AuthSystem.ROOT_USER_ID, Instant.now()).orElseThrow() : owner;
+    var user = admin ? auth.authenticateBySubject(AuthSystem.ROOT_USER_ID, Instant.now(), 0L).orElseThrow() : owner;
     when(server.getInstance(ids.getFirst())).thenReturn(Optional.empty());
     assertEquals(admin ? Set.copyOf(ids.subList(1, 3)) : Set.of(ids.get(1)), list(user).getInstancesList().stream()
       .map(instance -> UUID.fromString(instance.getId())).collect(Collectors.toSet()));

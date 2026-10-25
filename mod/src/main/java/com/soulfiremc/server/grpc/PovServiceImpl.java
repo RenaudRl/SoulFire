@@ -346,7 +346,7 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
       this.onBotDisconnected = event -> { if (event.connection() == bot) disconnected(); };
       this.onSessionsInvalidated = event -> {
         if (event.soulFireServer() == server && event.userId().equals(owner)
-          && user.getIssuedAt().isBefore(event.minimumIssuedAt())) {
+          && user.getSessionVersion() < event.minimumSessionVersion()) {
           fail(Status.UNAUTHENTICATED.withDescription("POV authorization was invalidated"));
         }
       };
@@ -368,7 +368,7 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
           observer.setOnCancelHandler(this::close);
         }
         // Catch revocation between request authentication and listener registration.
-        if (server.authSystem().authenticateBySubject(owner, user.getIssuedAt()).isEmpty()) {
+        if (server.authSystem().authenticateBySubject(owner, user.getIssuedAt(), user.getSessionVersion()).isEmpty()) {
           fail(Status.UNAUTHENTICATED.withDescription("POV authorization was invalidated"));
         }
         // Disconnection may have begun before the listener was registered.

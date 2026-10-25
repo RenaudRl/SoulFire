@@ -1111,7 +1111,7 @@ final class ScriptExecutionServiceTest {
       when(user.getUniqueId()).thenReturn(owner);
       when(user.getIssuedAt()).thenReturn(issued);
       when(user.hasPermission(any(PermissionContext.class))).thenReturn(true);
-      when(auth.authenticateBySubject(owner, issued)).thenReturn(Optional.of(user));
+      when(auth.authenticateBySubject(owner, issued, 0L)).thenReturn(Optional.of(user));
       id = UUID.fromString(saveScript("action.print"));
     }
 

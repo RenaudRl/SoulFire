@@ -153,7 +153,7 @@ final class PovSessionLifecycleTest {
               SoulFireAPI.postEvent(new BotDisconnectedEvent(fixture.bot, Component.text("Bot stopped")));
             };
             case INVALIDATION -> () -> SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(
-              fixture.server, fixture.owner, fixture.issuedAt.plusSeconds(1)));
+              fixture.server, fixture.owner, 1L));
           };
           executor.submit(interrupt).get(1, TimeUnit.SECONDS);
           var nativeCleanup = fixture.pendingNative.poll();
@@ -223,8 +223,8 @@ final class PovSessionLifecycleTest {
   void revocationBeforeListenerRegistrationStillClosesTheViewer() {
     try (var fixture = new WatchFixture()) {
       when(fixture.channel.closeFuture()).thenAnswer(_ -> {
-        when(fixture.auth.authenticateBySubject(fixture.owner, fixture.issuedAt)).thenReturn(Optional.empty());
-        SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, fixture.issuedAt.plusSeconds(1)));
+        when(fixture.auth.authenticateBySubject(fixture.owner, fixture.issuedAt, 0L)).thenReturn(Optional.empty());
+        SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, 1L));
         return fixture.transportClosed;
       });
       fixture.watch();
@@ -243,12 +243,30 @@ final class PovSessionLifecycleTest {
   void invalidationOnlyClosesOlderSessionsForTheSameUserAndServer() {
     try (var fixture = new WatchFixture()) {
       fixture.watch();
-      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(mock(SoulFireServer.class), fixture.owner, Instant.MAX));
-      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, UUID.randomUUID(), Instant.MAX));
-      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, fixture.issuedAt));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(mock(SoulFireServer.class), fixture.owner, Long.MAX_VALUE));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, UUID.randomUUID(), Long.MAX_VALUE));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, 0L));
       assertNull(fixture.terminalError.get());
       assertThrows(BotControlLeaseManager.InvalidLeaseException.class, () -> fixture.leases.authorize(fixture.botId, null));
-      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, Instant.MAX));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, Long.MAX_VALUE));
+      assertEquals(Status.Code.UNAUTHENTICATED, Status.fromThrowable(fixture.terminalError.get()).getCode());
+      assertDoesNotThrow(() -> fixture.leases.authorize(fixture.botId, null));
+      fixture.drainNative();
+      verify(fixture.input).capture(false);
+    }
+  }
+
+  @Test
+  void aNewSessionSurvivesAnOlderRevocationDeliveredAfterItStarts() {
+    try (var fixture = new WatchFixture()) {
+      when(fixture.user.getSessionVersion()).thenReturn(7L);
+      when(fixture.auth.authenticateBySubject(fixture.owner, fixture.issuedAt, 7L)).thenReturn(Optional.of(fixture.user));
+      fixture.watch();
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, 6L));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, 7L));
+      assertNull(fixture.terminalError.get());
+      assertThrows(BotControlLeaseManager.InvalidLeaseException.class, () -> fixture.leases.authorize(fixture.botId, null));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, 8L));
       assertEquals(Status.Code.UNAUTHENTICATED, Status.fromThrowable(fixture.terminalError.get()).getCode());
       assertDoesNotThrow(() -> fixture.leases.authorize(fixture.botId, null));
       fixture.drainNative();
@@ -285,7 +303,7 @@ final class PovSessionLifecycleTest {
     WatchFixture() {
       when(server.scheduler()).thenReturn(scheduler);
       when(server.authSystem()).thenReturn(auth);
-      when(auth.authenticateBySubject(owner, issuedAt)).thenReturn(Optional.of(user));
+      when(auth.authenticateBySubject(owner, issuedAt, 0L)).thenReturn(Optional.of(user));
       when(bot.accountProfileId()).thenReturn(botId);
       when(server.getInstance(instanceId)).thenReturn(Optional.of(instance));
       when(instance.botConnections()).thenReturn(Map.of(botId, bot));

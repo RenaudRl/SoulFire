@@ -19,10 +19,9 @@ package com.soulfiremc.server.api.event;
 
 import com.soulfiremc.server.SoulFireServer;
 
-import java.time.Instant;
 import java.util.UUID;
 
-/// Published after a user's session cutoff changes or the user is deleted.
-/// A deleted user has a cutoff of Instant.MAX.
-public record UserSessionsInvalidatedEvent(SoulFireServer soulFireServer, UUID userId, Instant minimumIssuedAt)
+/// Published after a user's session version changes or the user is deleted.
+/// A deleted user has a minimum version of Long.MAX_VALUE.
+public record UserSessionsInvalidatedEvent(SoulFireServer soulFireServer, UUID userId, long minimumSessionVersion)
   implements SoulFireGlobalEvent {}

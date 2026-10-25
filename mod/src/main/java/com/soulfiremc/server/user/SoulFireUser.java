@@ -85,4 +85,6 @@ public interface SoulFireUser {
   UserRole getRole();
 
   Instant getIssuedAt();
+
+  long getSessionVersion();
 }

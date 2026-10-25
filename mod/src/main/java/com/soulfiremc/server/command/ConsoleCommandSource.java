@@ -71,4 +71,9 @@ public final class ConsoleCommandSource implements SoulFireUser {
   public Instant getIssuedAt() {
     return Instant.now();
   }
+
+  @Override
+  public long getSessionVersion() {
+    return authSystem.rootUserData().getSessionVersion();
+  }
 }

@@ -108,7 +108,7 @@ public final class AuthSystemRootDefaultEmailTest {
         var userId = UUID.randomUUID();
         server.dsl().execute("INSERT INTO users (id, username, email, role, min_issued_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
           userId.toString(), "permission-user", "permission-user@example.com", "USER");
-        var user = server.authSystem().authenticateBySubject(userId, Instant.now()).orElseThrow();
+        var user = server.authSystem().authenticateBySubject(userId, Instant.now(), 0L).orElseThrow();
         var createInstance = PermissionContext.global(GlobalPermission.CREATE_INSTANCE);
         assertTrue(user.hasPermission(createInstance));
         assertFalse(user.hasPermission(PermissionContext.global(GlobalPermission.READ_SERVER_CONFIG)));

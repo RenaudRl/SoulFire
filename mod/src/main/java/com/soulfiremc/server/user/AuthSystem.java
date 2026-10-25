@@ -28,7 +28,9 @@ import com.soulfiremc.server.database.generated.tables.records.UsersRecord;
 import com.soulfiremc.server.grpc.LogServiceImpl;
 import com.soulfiremc.server.settings.lib.ServerSettingsSource;
 import com.soulfiremc.server.settings.server.ServerSettings;
-import io.jsonwebtoken.*;
+import io.jsonwebtoken.JwtException;
+import io.jsonwebtoken.JwtParser;
+import io.jsonwebtoken.Jwts;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.kyori.adventure.text.Component;
@@ -58,6 +60,7 @@ public final class AuthSystem {
   public static final String ROOT_DEFAULT_EMAIL = "root@soulfiremc.com";
   public static final String ROOT_DEFAULT_EMAIL_PROPERTY = "sf.root.default.email";
   public static final String ROOT_DEFAULT_EMAIL_ENV = "SF_ROOT_DEFAULT_EMAIL";
+  private static final String SESSION_VERSION_CLAIM = "sessionVersion";
   private final LogServiceImpl.StateHolder logService;
   private final ServerSettingsSource settingsSource;
   private final SecretKey jwtSecretKey;
@@ -208,36 +211,38 @@ public final class AuthSystem {
   }
 
   public Optional<SoulFireUser> authenticateByToken(String token, String audience) {
-    Jws<Claims> claims;
+    UUID userId;
+    Instant issuedAt;
+    long sessionVersion;
     try {
-      // verify token signature and parse claims
-      claims = parser.parseSignedClaims(token);
-    } catch (JwtException _) {
+      var claims = parser.parseSignedClaims(token).getPayload();
+      if (claims.getAudience() == null || !claims.getAudience().contains(audience)
+        || claims.getSubject() == null || claims.getIssuedAt() == null) {
+        return Optional.empty();
+      }
+      userId = UUID.fromString(claims.getSubject());
+      issuedAt = claims.getIssuedAt().toInstant();
+      // Tokens issued before session versioning belong to the initial generation.
+      var claimedVersion = claims.get(SESSION_VERSION_CLAIM, Long.class);
+      sessionVersion = claimedVersion == null ? 0L : claimedVersion;
+      if (sessionVersion < 0) return Optional.empty();
+    } catch (JwtException | IllegalArgumentException _) {
       return Optional.empty();
     }
 
-    if (claims == null
-      || claims.getPayload().getAudience() == null
-      || !claims.getPayload().getAudience().contains(audience)) {
-      return Optional.empty();
-    }
-
-    return authenticateBySubject(
-      UUID.fromString(claims.getPayload().getSubject()),
-      claims.getPayload().getIssuedAt().toInstant()
-    );
+    return authenticateBySubject(userId, issuedAt, sessionVersion);
   }
 
-  public Optional<SoulFireUser> authenticateBySubject(UUID uuid, Instant issuedAt) {
+  public Optional<SoulFireUser> authenticateBySubject(UUID uuid, Instant issuedAt, long sessionVersion) {
     return dsl.transactionResult(cfg -> {
       var ctx = DSL.using(cfg);
       var userRecord = ctx.selectFrom(Tables.USERS).where(Tables.USERS.ID.eq(uuid.toString())).fetchOne();
-      if (userRecord == null) {
+      if (userRecord == null || userRecord.getSessionVersion() != sessionVersion) {
         return Optional.empty();
       }
 
-      // Used to prevent old/stolen JWTs from being used
-      // Truncate to seconds because JWTs only have second precision
+      // Preserve timestamp revocations made before session versioning was introduced.
+      // JWT timestamps only have second precision; new revocations also advance the version.
       var minIssuedAt = userRecord.getMinIssuedAt().toInstant(ZoneOffset.UTC);
       if (issuedAt.isBefore(minIssuedAt.truncatedTo(ChronoUnit.SECONDS))) {
         return Optional.empty();
@@ -254,7 +259,7 @@ public final class AuthSystem {
           .execute();
       }
 
-      return Optional.of(new SoulFireUserImpl(logService, userRecord, dsl, settingsSource, issuedAt));
+      return Optional.of(new SoulFireUserImpl(logService, userRecord, dsl, settingsSource, issuedAt, sessionVersion));
     });
   }
 
@@ -265,24 +270,27 @@ public final class AuthSystem {
 
     dsl.deleteFrom(Tables.USERS).where(Tables.USERS.ID.eq(uuid.toString())).execute();
 
-    SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, uuid, Instant.MAX));
+    SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, uuid, Long.MAX_VALUE));
     logService.disconnect(uuid);
   }
 
   public void invalidateSessions(UUID uuid) {
     var now = LocalDateTime.now(ZoneOffset.UTC);
-    dsl.transaction(cfg -> {
-      var updated = DSL.using(cfg).update(Tables.USERS)
+    var sessionVersion = dsl.transactionResult(cfg -> {
+      var ctx = DSL.using(cfg);
+      var updated = ctx.update(Tables.USERS)
         .set(Tables.USERS.MIN_ISSUED_AT, now)
+        .set(Tables.USERS.SESSION_VERSION, Tables.USERS.SESSION_VERSION.plus(1L))
         .set(Tables.USERS.UPDATED_AT, now)
         .where(Tables.USERS.ID.eq(uuid.toString()))
         .execute();
       if (updated == 0) {
         throw new IllegalArgumentException("User not found: " + uuid);
       }
+      return ctx.select(Tables.USERS.SESSION_VERSION).from(Tables.USERS)
+        .where(Tables.USERS.ID.eq(uuid.toString())).fetchSingle(Tables.USERS.SESSION_VERSION);
     });
-    SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, uuid,
-      now.toInstant(ZoneOffset.UTC).truncatedTo(ChronoUnit.SECONDS)));
+    SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, uuid, sessionVersion));
   }
 
   public UsersRecord rootUserData() {
@@ -299,6 +307,7 @@ public final class AuthSystem {
       .claims()
       .subject(UUID.fromString(user.getId()).toString())
       .issuedAt(Date.from(Instant.now()))
+      .add(SESSION_VERSION_CLAIM, user.getSessionVersion())
       .audience()
       .add(audience)
       .and()
@@ -311,7 +320,8 @@ public final class AuthSystem {
     UsersRecord userData,
     DSLContext dsl,
     ServerSettingsSource settingsSource,
-    Instant issuedAt
+    Instant issuedAt,
+    long sessionVersion
   ) implements SoulFireUser {
     @Override
     public UUID getUniqueId() {
@@ -336,6 +346,11 @@ public final class AuthSystem {
     @Override
     public Instant getIssuedAt() {
       return issuedAt;
+    }
+
+    @Override
+    public long getSessionVersion() {
+      return sessionVersion;
     }
 
     @Override
