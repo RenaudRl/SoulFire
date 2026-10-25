@@ -43,6 +43,7 @@ export default {
               yield* rcon("fill 4260 64 4 4278 64 12 air");
               yield* rcon("fill 4260 63 4 4278 63 12 stone");
               yield* placeBot(bot, { x: 4262.5, y: 64, z: 8.5 }, -90);
+              yield* bot.selectHotbar(0);
               for (const x of CROPS) {
                 yield* rcon(`setblock ${x} 63 8 farmland[moisture=7]`);
                 yield* rcon(`setblock ${x} 64 8 wheat[age=7]`);
@@ -79,6 +80,7 @@ export default {
                 radius: 10,
                 maximumHarvests,
                 replant: true,
+                restoreSelectedSlot: true,
                 completeWhenNoMatureCrops: true,
                 reconnectPolicy: BotTaskReconnectPolicy.PAUSE_AND_RESUME,
                 idempotencyKey: randomUUID(),
@@ -187,6 +189,18 @@ export default {
               yield* check(
                 crops.every((crop) => crop.matches),
                 "Reconnect changed extra crops or skipped a pending replant",
+              );
+              yield* eventually(
+                rcon(`data get entity ${BOT_NAME} SelectedItemSlot`).pipe(
+                  Effect.tap((value) =>
+                    check(
+                      value.endsWith(": 0"),
+                      `Farming did not restore its initial slot: ${value}`,
+                    ),
+                  ),
+                ),
+                "5 seconds",
+                "50 millis",
               );
               const replay = yield* bot.tasks.farm(options);
               yield* check(

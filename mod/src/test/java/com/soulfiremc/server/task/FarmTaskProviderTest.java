@@ -47,6 +47,8 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -62,6 +64,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 final class FarmTaskProviderTest {
@@ -155,6 +159,40 @@ final class FarmTaskProviderTest {
     assertEquals(1, fixture.harvests);
   }
 
+  @ParameterizedTest
+  @CsvSource({"0, true", "3, true", "3, false"})
+  void preservesTheInitialSelectionAcrossRepeatedExecutions(int originalSlot, boolean restore) {
+    var fixture = new Fixture();
+    var factory = fixture.factory(3, restore);
+    var firstInventory = mock(Inventory.class);
+    when(firstInventory.getSelectedSlot()).thenReturn(originalSlot);
+    var first = fixture.start(factory, firstInventory);
+    fixture.tickUntil(first, () -> fixture.progress.getCurrent() == 1);
+    first.control().onSuspended();
+    first.control().onStopped(ControlStopReason.CANCELLED, null);
+    verify(firstInventory, never()).setSelectedSlot(anyInt());
+
+    var secondInventory = mock(Inventory.class);
+    when(secondInventory.getSelectedSlot()).thenReturn(2);
+    var second = fixture.start(factory, secondInventory);
+    fixture.tickUntil(second, () -> fixture.progress.getCurrent() == 2);
+    second.control().onSuspended();
+    second.control().onStopped(ControlStopReason.CANCELLED, null);
+    verify(secondInventory, never()).setSelectedSlot(anyInt());
+
+    var thirdInventory = mock(Inventory.class);
+    when(thirdInventory.getSelectedSlot()).thenReturn(6);
+    var third = fixture.start(factory, thirdInventory);
+    fixture.tickUntil(third, () -> third.result().isDone());
+    third.control().onStopped(ControlStopReason.COMPLETED, null);
+    if (restore) {
+      verify(thirdInventory).setSelectedSlot(originalSlot);
+    } else {
+      verify(thirdInventory, never()).setSelectedSlot(anyInt());
+    }
+    assertEquals(3, fixture.harvests);
+  }
+
   private static final class Fixture {
     final Map<BlockPos, BlockState> blocks = new HashMap<>();
     BotTaskProgress progress = BotTaskProgress.getDefaultInstance();
@@ -170,13 +208,21 @@ final class FarmTaskProviderTest {
     }
 
     BotTaskProvider.ExecutionFactory factory(int maximumHarvests) {
+      return factory(maximumHarvests, false);
+    }
+
+    BotTaskProvider.ExecutionFactory factory(int maximumHarvests, boolean restore) {
       return new FarmTaskProvider().prepare(FarmTask.newBuilder()
         .setCenter(BlockPosition.newBuilder().setY(64))
-        .setRadius(4).setMaximumHarvests(maximumHarvests)
+        .setRadius(4).setMaximumHarvests(maximumHarvests).setRestoreSelectedSlot(restore)
         .setCompleteWhenNoMatureCrops(true).build());
     }
 
     BotTaskExecution start(BotTaskProvider.ExecutionFactory factory) {
+      return start(factory, mock(Inventory.class));
+    }
+
+    BotTaskExecution start(BotTaskProvider.ExecutionFactory factory, Inventory inventory) {
       var minecraft = mock(Minecraft.class);
       var player = mock(LocalPlayer.class);
       var level = mock(ClientLevel.class);
@@ -185,7 +231,7 @@ final class FarmTaskProviderTest {
       minecraft.player = player;
       minecraft.level = level;
       minecraft.gameMode = gameMode;
-      when(player.getInventory()).thenReturn(mock(Inventory.class));
+      when(player.getInventory()).thenReturn(inventory);
       when(player.getEyePosition()).thenReturn(new Vec3(.5, 65.5, .5));
       when(player.blockPosition()).thenReturn(new BlockPos(0, 64, 0));
       var held = mock(ItemStack.class);

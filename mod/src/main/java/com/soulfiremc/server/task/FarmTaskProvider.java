@@ -64,6 +64,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -267,7 +268,6 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
     private final boolean restoreSelectedSlot;
     private final PathConstraint constraint;
     private final CompletableFuture<FarmTaskResult> result;
-    private int originalSelectedSlot;
     private boolean active;
     private final RecoveryState recovery;
     private @Nullable PathExecutor path;
@@ -920,7 +920,7 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
       }
       var player = context.bot().minecraft().player;
       if (player != null) {
-        player.getInventory().setSelectedSlot(originalSelectedSlot);
+        recovery.originalSelectedSlot.ifPresent(player.getInventory()::setSelectedSlot);
       }
     }
 
@@ -941,7 +941,9 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
 
     @Override
     public void onStarted() {
-      originalSelectedSlot = requirePlayer().getInventory().getSelectedSlot();
+      if (recovery.originalSelectedSlot.isEmpty()) {
+        recovery.originalSelectedSlot = OptionalInt.of(requirePlayer().getInventory().getSelectedSlot());
+      }
       active = true;
     }
 
@@ -1000,6 +1002,7 @@ public final class FarmTaskProvider implements BotTaskProvider<FarmTask> {
   }
 
   private static final class RecoveryState {
+    private OptionalInt originalSelectedSlot = OptionalInt.empty();
     private @Nullable CropTarget target;
     private @Nullable String dimension;
     private Stage stage = Stage.SCAN;
