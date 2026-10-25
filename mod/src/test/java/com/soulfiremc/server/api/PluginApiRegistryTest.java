@@ -17,6 +17,9 @@
  */
 package com.soulfiremc.server.api;
 
+import com.google.protobuf.DescriptorProtos;
+import com.google.protobuf.Descriptors;
+import com.google.protobuf.DynamicMessage;
 import com.mojang.brigadier.CommandDispatcher;
 import com.soulfiremc.grpc.generated.ClientServiceGrpc;
 import com.soulfiremc.grpc.generated.plugin.example.v1.EchoRequest;
@@ -31,6 +34,7 @@ import com.soulfiremc.server.settings.lib.SettingsPageRegistry;
 import com.soulfiremc.server.settings.server.DevSettings;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -40,6 +44,66 @@ import java.util.concurrent.CompletableFuture;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PluginApiRegistryTest {
+  @Test
+  void descriptorFilesCanBeLoadedInTheirExportedOrder() throws Exception {
+    var registry = new PluginApiRegistry();
+    var context = registry.createContext(pluginInfo("example"));
+    context.permissions().register(readPermission());
+    context.sdk().register(metadata(1));
+    context.rpc().register(new ExamplePluginServiceGrpc.ExamplePluginServiceImplBase() {});
+    var files = registry.find("example").orElseThrow().descriptorSet().getFileList();
+    var loaded = new LinkedHashMap<String, Descriptors.FileDescriptor>();
+
+    for (var file : files) {
+      assertTrue(loaded.keySet().containsAll(file.getDependencyList()), () -> file.getName() + " precedes its dependencies");
+      var dependencies = file.getDependencyList().stream().map(loaded::get).toArray(Descriptors.FileDescriptor[]::new);
+      loaded.put(file.getName(), Descriptors.FileDescriptor.buildFrom(file, dependencies));
+    }
+
+    var expected = EchoRequest.getDescriptor().getFile();
+    var request = loaded.get(expected.getName()).findMessageTypeByName("EchoRequest");
+    assertEquals("instanceId", request.findFieldByName("instance_id").toProto().getJsonName());
+    assertEquals(files, registry.find("example").orElseThrow().descriptorSet().getFileList());
+  }
+
+  @Test
+  void exportsComputedAndExplicitJsonNamesForNestedFieldsAndExtensions() throws Exception {
+    var field = DescriptorProtos.FieldDescriptorProto.newBuilder()
+      .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
+      .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32);
+    var extension = field.clone().setExtendee(".soulfire.plugin.example.v1.Payload");
+    var file = Descriptors.FileDescriptor.buildFrom(
+      DescriptorProtos.FileDescriptorProto.newBuilder()
+        .setName("json-names.proto")
+        .setPackage("soulfire.plugin.example.v1")
+        .addMessageType(DescriptorProtos.DescriptorProto.newBuilder()
+          .setName("Payload")
+          .addField(field.clone().setName("outer_value").setNumber(1))
+          .addField(field.clone().setName("custom_value").setNumber(2).setJsonName("customJSON"))
+          .addExtensionRange(DescriptorProtos.DescriptorProto.ExtensionRange.newBuilder().setStart(100).setEnd(200))
+          .addNestedType(DescriptorProtos.DescriptorProto.newBuilder()
+            .setName("Nested")
+            .addField(field.clone().setName("nested_value").setNumber(1))
+            .addExtension(extension.clone().setName("nested_extension").setNumber(100))))
+        .addExtension(extension.clone().setName("top_extension").setNumber(101))
+        .build(),
+      new Descriptors.FileDescriptor[0]
+    );
+    var registry = new PluginApiRegistry();
+    var context = registry.createContext(pluginInfo("example"));
+    var permission = context.permissions().register(readPermission());
+    context.events().register(DynamicMessage.getDefaultInstance(file.getMessageTypes().getFirst()), permission);
+
+    var exported = registry.find("example").orElseThrow().descriptorSet().getFile(0);
+    var payload = exported.getMessageType(0);
+    assertEquals("outerValue", payload.getField(0).getJsonName());
+    assertEquals("customJSON", payload.getField(1).getJsonName());
+    assertEquals("nestedValue", payload.getNestedType(0).getField(0).getJsonName());
+    assertEquals("nestedExtension", payload.getNestedType(0).getExtension(0).getJsonName());
+    assertEquals("topExtension", exported.getExtension(0).getJsonName());
+    assertEquals(file.getName(), Descriptors.FileDescriptor.buildFrom(exported, new Descriptors.FileDescriptor[0]).getName());
+  }
+
   @Test
   void buildsDeterministicCatalogFromRegisteredService() {
     var registry = new PluginApiRegistry();

@@ -524,19 +524,43 @@ public final class PluginApiRegistry {
         registration.prototype().getDescriptorForType().getFile(),
         descriptors
       ));
+    var ordered = new LinkedHashMap<String, Descriptors.FileDescriptor>();
+    descriptors.values().forEach(descriptor -> collectFiles(descriptor, ordered));
     return DescriptorProtos.FileDescriptorSet.newBuilder()
-      .addAllFile(descriptors.values().stream().map(Descriptors.FileDescriptor::toProto).toList())
+      .addAllFile(ordered.values().stream().map(PluginApiRegistry::descriptorProto).toList())
       .build();
+  }
+
+  // Generated Java descriptors may omit computed JSON names from their compact protos.
+  // Include them for consumers that load descriptor sets without recomputing metadata.
+  private static DescriptorProtos.FileDescriptorProto descriptorProto(Descriptors.FileDescriptor descriptor) {
+    var builder = descriptor.toProto().toBuilder();
+    descriptor.getMessageTypes().forEach(message -> builder.setMessageType(message.getIndex(), descriptorProto(message)));
+    descriptor.getExtensions().forEach(field -> builder.setExtension(field.getIndex(), descriptorProto(field)));
+    return builder.build();
+  }
+
+  private static DescriptorProtos.DescriptorProto descriptorProto(Descriptors.Descriptor descriptor) {
+    var builder = descriptor.toProto().toBuilder();
+    descriptor.getFields().forEach(field -> builder.setField(field.getIndex(), descriptorProto(field)));
+    descriptor.getNestedTypes().forEach(message -> builder.setNestedType(message.getIndex(), descriptorProto(message)));
+    descriptor.getExtensions().forEach(field -> builder.setExtension(field.getIndex(), descriptorProto(field)));
+    return builder.build();
+  }
+
+  private static DescriptorProtos.FieldDescriptorProto descriptorProto(Descriptors.FieldDescriptor descriptor) {
+    return descriptor.toProto().toBuilder().setJsonName(descriptor.getJsonName()).build();
   }
 
   private static void collectFiles(
     Descriptors.FileDescriptor descriptor,
     Map<String, Descriptors.FileDescriptor> descriptors
   ) {
-    if (descriptors.putIfAbsent(descriptor.getName(), descriptor) != null) {
+    if (descriptors.containsKey(descriptor.getName())) {
       return;
     }
     descriptor.getDependencies().forEach(dependency -> collectFiles(dependency, descriptors));
+    descriptors.put(descriptor.getName(), descriptor);
   }
 
   private static byte[] sha256(byte[] value) {
