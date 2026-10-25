@@ -466,6 +466,7 @@ public final class ExcavateTaskProvider implements BotTaskProvider<ExcavateTask>
           .setZ(player.getZ())
           .setDimension(level.dimension().identifier().toString()));
       }
+      context.reportProgress(progress("Excavation finished"));
       result.complete(builder.build());
     }
 

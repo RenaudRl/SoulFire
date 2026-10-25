@@ -92,6 +92,9 @@ class ExcavateRecoveryTest {
       assertEquals(12, result.getBlocksSkipped());
       assertEquals(0, result.getUnreachableBlocks());
       assertEquals(expected, fixture.removed);
+      assertEquals(expected, fixture.progress.getCurrent());
+      assertEquals(expected, fixture.progress.getTotal());
+      assertEquals(1.0, fixture.progress.getFraction());
       if (maximumBlocks > 0) {
         assertTrue(fixture.blocks.containsKey(new BlockPos(12, 64, 0)));
         assertTrue(fixture.blocks.containsKey(new BlockPos(16, 64, 0)));
@@ -127,19 +130,30 @@ class ExcavateRecoveryTest {
     }
   }
 
-  @Test
-  void retainsConfirmedUnreachableWorkWithoutRetryingIt() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void retainsConfirmedUnreachableWorkWithoutRetryingIt(boolean allUnreachable) throws Exception {
     try (var fixture = new Fixture()) {
       var failedTarget = new BlockPos(0, 64, 0);
       fixture.failures.add(failedTarget);
+      if (allUnreachable) {
+        fixture.failures.add(new BlockPos(4, 64, 0));
+        fixture.failures.add(new BlockPos(8, 64, 0));
+      }
       var factory = fixture.factory(3);
       var first = fixture.start(factory);
       fixture.until(first, () -> fixture.progress.getCurrent() == 1);
       first.control().onStopped(ControlStopReason.CANCELLED, null);
       var result = fixture.finish(fixture.start(factory));
-      assertEquals(2, result.getBlocksBroken());
-      assertEquals(1, result.getUnreachableBlocks());
+      assertEquals(allUnreachable ? 0 : 2, result.getBlocksBroken());
+      assertEquals(allUnreachable ? 3 : 1, result.getUnreachableBlocks());
+      assertEquals(allUnreachable
+        ? ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_NO_REACHABLE_BLOCKS
+        : ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_BLOCK_LIMIT_REACHED, result.getReason());
       assertEquals(1, fixture.attempts.get(failedTarget));
+      assertEquals(3, fixture.progress.getCurrent());
+      assertEquals(3, fixture.progress.getTotal());
+      assertEquals(1.0, fixture.progress.getFraction());
     }
   }
 
@@ -195,6 +209,26 @@ class ExcavateRecoveryTest {
       assertTrue(recovered.result().isDone());
       assertEquals(1, ((ExcavateTaskResult) recovered.result().join()).getBlocksBroken());
       assertEquals(1, fixture.removed);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void reportsZeroWorkForEntirelySkippedRegions(boolean undiggable) throws Exception {
+    try (var fixture = new Fixture()) {
+      fixture.blocks.clear();
+      if (undiggable) {
+        fixture.blocks.put(new BlockPos(0, 64, 0), Blocks.BEDROCK.defaultBlockState());
+      }
+      var result = fixture.finish(fixture.start(fixture.factory(0)));
+      assertEquals(ExcavateCompletionReason.EXCAVATE_COMPLETION_REASON_AREA_CLEARED, result.getReason());
+      assertEquals(0, result.getBlocksBroken());
+      assertEquals(17, result.getBlocksSkipped());
+      assertEquals(0, result.getUnreachableBlocks());
+      assertTrue(fixture.progress.hasTotal());
+      assertEquals(0, fixture.progress.getCurrent());
+      assertEquals(0, fixture.progress.getTotal());
+      assertEquals(1.0, fixture.progress.getFraction());
     }
   }
 
