@@ -30,6 +30,7 @@ import com.soulfiremc.server.InstanceManager;
 import com.soulfiremc.server.SoulFireScheduler;
 import com.soulfiremc.server.SoulFireServer;
 import com.soulfiremc.server.api.SoulFireAPI;
+import com.soulfiremc.server.api.event.UserSessionsInvalidatedEvent;
 import com.soulfiremc.server.api.event.bot.BotDisconnectedEvent;
 import com.soulfiremc.server.bot.BotConnection;
 import com.soulfiremc.server.bot.BotControlLeaseManager;
@@ -37,6 +38,7 @@ import com.soulfiremc.server.bot.PovInputController;
 import com.soulfiremc.server.renderer.PovFrameTasks;
 import com.soulfiremc.server.renderer.PovVideoEncoder;
 import com.soulfiremc.server.renderer.VulkanRenderer;
+import com.soulfiremc.server.user.AuthSystem;
 import com.soulfiremc.server.user.SoulFireUser;
 import com.soulfiremc.test.utils.TestBootstrap;
 import io.grpc.Context;
@@ -59,6 +61,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -97,7 +100,7 @@ final class PovSessionLifecycleTest {
     TestBootstrap.bootstrapForTest();
   }
 
-  private enum Cancellation { GRPC, CONNECTION, DISCONNECT }
+  private enum Cancellation { GRPC, CONNECTION, DISCONNECT, INVALIDATION }
 
   static Stream<Arguments> interruptions() {
     return Stream.of(true, false).flatMap(startup -> Stream.of(Cancellation.values()).map(cancellation -> Arguments.of(startup, cancellation)));
@@ -149,6 +152,8 @@ final class PovSessionLifecycleTest {
               when(fixture.bot.isDisconnecting()).thenReturn(true);
               SoulFireAPI.postEvent(new BotDisconnectedEvent(fixture.bot, Component.text("Bot stopped")));
             };
+            case INVALIDATION -> () -> SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(
+              fixture.server, fixture.owner, fixture.issuedAt.plusSeconds(1)));
           };
           executor.submit(interrupt).get(1, TimeUnit.SECONDS);
           var nativeCleanup = fixture.pendingNative.poll();
@@ -171,8 +176,9 @@ final class PovSessionLifecycleTest {
           fixture.leases.authorize(fixture.botId, replacement.token());
           if (duringStartup) verify(encoder.get(), never()).encode(any(ByteBuffer.class), anyLong(), anyBoolean());
           verify(fixture.observer, never()).onNext(any());
-          if (cancellation == Cancellation.DISCONNECT) {
-            assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(fixture.terminalError.get()).getCode());
+          if (cancellation == Cancellation.DISCONNECT || cancellation == Cancellation.INVALIDATION) {
+            assertEquals(cancellation == Cancellation.DISCONNECT ? Status.Code.UNAVAILABLE : Status.Code.UNAUTHENTICATED,
+              Status.fromThrowable(fixture.terminalError.get()).getCode());
             assertEquals(1, fixture.errors.get());
           } else assertEquals(0, fixture.errors.get());
         } finally {
@@ -213,11 +219,50 @@ final class PovSessionLifecycleTest {
     }
   }
 
+  @Test
+  void revocationBeforeListenerRegistrationStillClosesTheViewer() {
+    try (var fixture = new WatchFixture()) {
+      when(fixture.channel.closeFuture()).thenAnswer(_ -> {
+        when(fixture.auth.authenticateBySubject(fixture.owner, fixture.issuedAt)).thenReturn(Optional.empty());
+        SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, fixture.issuedAt.plusSeconds(1)));
+        return fixture.transportClosed;
+      });
+      fixture.watch();
+      assertEquals(Status.Code.UNAUTHENTICATED, Status.fromThrowable(fixture.terminalError.get()).getCode());
+      assertDoesNotThrow(() -> fixture.leases.authorize(fixture.botId, null));
+      fixture.drainNative();
+      verify(fixture.input).capture(false);
+      fixture.scheduled.get().run();
+      verify(fixture.captures, never()).submit(any());
+      fixture.cancel.get().run();
+      assertEquals(1, fixture.errors.get());
+    }
+  }
+
+  @Test
+  void invalidationOnlyClosesOlderSessionsForTheSameUserAndServer() {
+    try (var fixture = new WatchFixture()) {
+      fixture.watch();
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(mock(SoulFireServer.class), fixture.owner, Instant.MAX));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, UUID.randomUUID(), Instant.MAX));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, fixture.issuedAt));
+      assertNull(fixture.terminalError.get());
+      assertThrows(BotControlLeaseManager.InvalidLeaseException.class, () -> fixture.leases.authorize(fixture.botId, null));
+      SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(fixture.server, fixture.owner, Instant.MAX));
+      assertEquals(Status.Code.UNAUTHENTICATED, Status.fromThrowable(fixture.terminalError.get()).getCode());
+      assertDoesNotThrow(() -> fixture.leases.authorize(fixture.botId, null));
+      fixture.drainNative();
+      verify(fixture.input).capture(false);
+    }
+  }
+
   private static final class WatchFixture implements AutoCloseable {
     final UUID instanceId = UUID.randomUUID();
     final UUID botId = UUID.randomUUID();
     final UUID owner = UUID.randomUUID();
+    final Instant issuedAt = Instant.now();
     final SoulFireServer server = mock();
+    final AuthSystem auth = mock();
     final SoulFireScheduler scheduler = mock();
     final InstanceManager instance = mock();
     final BotConnection bot = mock();
@@ -239,11 +284,14 @@ final class PovSessionLifecycleTest {
 
     WatchFixture() {
       when(server.scheduler()).thenReturn(scheduler);
+      when(server.authSystem()).thenReturn(auth);
+      when(auth.authenticateBySubject(owner, issuedAt)).thenReturn(Optional.of(user));
       when(bot.accountProfileId()).thenReturn(botId);
       when(server.getInstance(instanceId)).thenReturn(Optional.of(instance));
       when(instance.botConnections()).thenReturn(Map.of(botId, bot));
       when(instance.botControlLeaseManager()).thenReturn(leases);
       when(user.getUniqueId()).thenReturn(owner);
+      when(user.getIssuedAt()).thenReturn(issuedAt);
       when(bot.minecraft()).thenReturn(minecraft);
       minecraft.player = mock(LocalPlayer.class);
       minecraft.level = mock(ClientLevel.class);

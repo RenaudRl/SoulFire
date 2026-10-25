@@ -216,18 +216,7 @@ public final class ClientServiceImpl extends ClientServiceGrpc.ClientServiceImpl
 
     try {
       var userId = ServerRPCConstants.USER_CONTEXT_KEY.get().getUniqueId();
-      var now = LocalDateTime.now(ZoneOffset.UTC);
-      soulFireServer.dsl().transaction(cfg -> {
-        var ctx = DSL.using(cfg);
-        var updated = ctx.update(Tables.USERS)
-          .set(Tables.USERS.MIN_ISSUED_AT, now)
-          .set(Tables.USERS.UPDATED_AT, now)
-          .where(Tables.USERS.ID.eq(userId.toString()))
-          .execute();
-        if (updated == 0) {
-          throw new IllegalArgumentException("User not found: " + userId);
-        }
-      });
+      soulFireServer.authSystem().invalidateSessions(userId);
 
       responseObserver.onNext(InvalidateSelfSessionsResponse.newBuilder().build());
       responseObserver.onCompleted();

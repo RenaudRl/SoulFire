@@ -20,6 +20,8 @@ package com.soulfiremc.server.user;
 import com.soulfiremc.grpc.generated.InstancePermission;
 import com.soulfiremc.server.SoulFireServer;
 import com.soulfiremc.server.adventure.SoulFireAdventure;
+import com.soulfiremc.server.api.SoulFireAPI;
+import com.soulfiremc.server.api.event.UserSessionsInvalidatedEvent;
 import com.soulfiremc.server.database.UserRole;
 import com.soulfiremc.server.database.generated.Tables;
 import com.soulfiremc.server.database.generated.tables.records.UsersRecord;
@@ -61,8 +63,10 @@ public final class AuthSystem {
   private final SecretKey jwtSecretKey;
   private final JwtParser parser;
   private final DSLContext dsl;
+  private final SoulFireServer server;
 
   public AuthSystem(SoulFireServer soulFireServer, DSLContext dsl) {
+    this.server = soulFireServer;
     this.logService = soulFireServer.logStateHolder();
     this.jwtSecretKey = soulFireServer.jwtSecretKey();
     this.parser = Jwts.parser().verifyWith(soulFireServer.jwtSecretKey()).build();
@@ -261,7 +265,24 @@ public final class AuthSystem {
 
     dsl.deleteFrom(Tables.USERS).where(Tables.USERS.ID.eq(uuid.toString())).execute();
 
+    SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, uuid, Instant.MAX));
     logService.disconnect(uuid);
+  }
+
+  public void invalidateSessions(UUID uuid) {
+    var now = LocalDateTime.now(ZoneOffset.UTC);
+    dsl.transaction(cfg -> {
+      var updated = DSL.using(cfg).update(Tables.USERS)
+        .set(Tables.USERS.MIN_ISSUED_AT, now)
+        .set(Tables.USERS.UPDATED_AT, now)
+        .where(Tables.USERS.ID.eq(uuid.toString()))
+        .execute();
+      if (updated == 0) {
+        throw new IllegalArgumentException("User not found: " + uuid);
+      }
+    });
+    SoulFireAPI.postEvent(new UserSessionsInvalidatedEvent(server, uuid,
+      now.toInstant(ZoneOffset.UTC).truncatedTo(ChronoUnit.SECONDS)));
   }
 
   public UsersRecord rootUserData() {

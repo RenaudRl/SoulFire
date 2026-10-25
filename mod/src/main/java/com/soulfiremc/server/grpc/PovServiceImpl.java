@@ -35,6 +35,7 @@ import com.soulfiremc.grpc.generated.PovStreamFeedback;
 import com.soulfiremc.grpc.generated.PovWatchRequest;
 import com.soulfiremc.server.SoulFireServer;
 import com.soulfiremc.server.api.SoulFireAPI;
+import com.soulfiremc.server.api.event.UserSessionsInvalidatedEvent;
 import com.soulfiremc.server.api.event.bot.BotDisconnectedEvent;
 import com.soulfiremc.server.bot.BotConnection;
 import com.soulfiremc.server.bot.BotControlLeaseManager;
@@ -188,6 +189,8 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
         @Override public void onNext(WebSocketFrame frame) {
           try {
             if (frame.type() == WebSocketFrameType.CLOSE) { onComplete(); return; }
+            // Keep reading the peer's closing handshake after server-side revocation.
+            if (bound != null && bound.closed.get()) { subscription.request(1); return; }
             if (frame.type() == WebSocketFrameType.PING) {
               if (!outgoing.tryWrite(WebSocketFrame.ofPong(frame.array()))) { onComplete(); return; }
               subscription.request(1);
@@ -211,10 +214,16 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
               try {
                 applyInput(session, request, session.user);
                 ctx.eventLoop().execute(() -> {
+                  if (session.closed.get()) { if (!ended) subscription.request(1); return; }
                   if (!outgoing.tryWrite(WebSocketFrame.ofText(Long.toString(request.getSequence())))) { onComplete(); return; }
                   subscription.request(1);
                 });
-              } catch (Throwable error) { ctx.eventLoop().execute(() -> onError(error)); }
+              } catch (Throwable error) {
+                ctx.eventLoop().execute(() -> {
+                  if (session.closed.get()) { if (!ended) subscription.request(1); }
+                  else onError(error);
+                });
+              }
             });
           } catch (Throwable error) { onError(error); }
         }
@@ -222,14 +231,21 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
           if (ended) return;
           ended = true;
           subscription.cancel();
-          if (bound != null) { bound.close(); if (!bound.observer.isCancelled()) bound.observer.onCompleted(); }
+          if (bound != null && bound.close()) {
+            synchronized (bound.observerLock) {
+              if (!bound.observer.isCancelled()) bound.observer.onCompleted();
+            }
+          }
           outgoing.close(error);
         }
         @Override public void onComplete() {
           if (ended) return;
           ended = true;
-          subscription.cancel();
-          if (bound != null) { bound.close(); if (!bound.observer.isCancelled()) bound.observer.onCompleted(); }
+          if (bound != null && bound.close()) {
+            synchronized (bound.observerLock) {
+              if (!bound.observer.isCancelled()) bound.observer.onCompleted();
+            }
+          }
           outgoing.close();
         }
       }, ctx.eventLoop());
@@ -292,6 +308,7 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
     private final ChannelFuture transportClosed;
     private final ChannelFutureListener onTransportClosed = _ -> close();
     private final Consumer<BotDisconnectedEvent> onBotDisconnected;
+    private final Consumer<UserSessionsInvalidatedEvent> onSessionsInvalidated;
     private final Object lifecycleLock = new Object();
     private final Object observerLock = new Object();
     private final AtomicBoolean rendering = new AtomicBoolean();
@@ -327,6 +344,12 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
       this.id = id; this.bot = bot; this.user = user; this.owner = user.getUniqueId(); this.leases = leases; this.token = token;
       this.transportClosed = transportClosed;
       this.onBotDisconnected = event -> { if (event.connection() == bot) disconnected(); };
+      this.onSessionsInvalidated = event -> {
+        if (event.soulFireServer() == server && event.userId().equals(owner)
+          && user.getIssuedAt().isBefore(event.minimumIssuedAt())) {
+          fail(Status.UNAUTHENTICATED.withDescription("POV authorization was invalidated"));
+        }
+      };
       this.observer = observer; this.width = even(width); this.height = even(height);
       this.format = codecs.contains("av1") ? PovVideoEncoder.Format.AV1 : codecs.contains("h264-high") ? PovVideoEncoder.Format.HIGH : PovVideoEncoder.Format.BASELINE;
       this.maxFps = Math.clamp(maxFps == 0 ? 60 : maxFps, 15, 120);
@@ -335,21 +358,35 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
     private void schedule(long delay) { server.scheduler().schedule(this::frame, delay, TimeUnit.NANOSECONDS); }
 
     private void registerCancellation() {
-      synchronized (lifecycleLock) {
-        SoulFireAPI.registerListener(BotDisconnectedEvent.class, onBotDisconnected);
-        // HTTP/1 defers request cancellation after disconnect to finish responses.
-        // A disconnected POV must release control without that grace period.
-        if (transportClosed != null) transportClosed.addListener(onTransportClosed);
-        observer.setOnCancelHandler(this::close);
+      try {
+        synchronized (lifecycleLock) {
+          SoulFireAPI.registerListener(BotDisconnectedEvent.class, onBotDisconnected);
+          SoulFireAPI.registerListener(UserSessionsInvalidatedEvent.class, onSessionsInvalidated);
+          // HTTP/1 defers request cancellation after disconnect to finish responses.
+          // A disconnected POV must release control without that grace period.
+          if (transportClosed != null) transportClosed.addListener(onTransportClosed);
+          observer.setOnCancelHandler(this::close);
+        }
+        // Catch revocation between request authentication and listener registration.
+        if (server.authSystem().authenticateBySubject(owner, user.getIssuedAt()).isEmpty()) {
+          fail(Status.UNAUTHENTICATED.withDescription("POV authorization was invalidated"));
+        }
+        // Disconnection may have begun before the listener was registered.
+        if (bot.isDisconnecting()) disconnected();
+      } catch (RuntimeException | Error error) {
+        close();
+        throw error;
       }
-      // Disconnection may have begun before the listener was registered.
-      if (bot.isDisconnecting()) disconnected();
     }
 
     private void disconnected() {
+      fail(Status.UNAVAILABLE.withDescription("Bot disconnected"));
+    }
+
+    private void fail(Status status) {
       if (!close()) return;
       synchronized (observerLock) {
-        if (!observer.isCancelled()) observer.onError(Status.UNAVAILABLE.withDescription("Bot disconnected").asRuntimeException());
+        if (!observer.isCancelled()) observer.onError(status.asRuntimeException());
       }
     }
 
@@ -461,6 +498,7 @@ public final class PovServiceImpl extends PovServiceGrpc.PovServiceImplBase {
         if (!closed.compareAndSet(false, true)) return false;
         sessions.remove(id, this);
         SoulFireAPI.unregisterListener(BotDisconnectedEvent.class, onBotDisconnected);
+        SoulFireAPI.unregisterListener(UserSessionsInvalidatedEvent.class, onSessionsInvalidated);
         if (transportClosed != null) transportClosed.removeListener(onTransportClosed);
       }
       if (inputChannel != null) inputChannel.close();
