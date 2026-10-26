@@ -4,8 +4,8 @@ plugins {
 
 val vulkanRuntimeDependencies = configurations.dependencyScope("vulkanRuntimeDependencies")
 
-// Native packages are bundled locally and have no Maven publication.
-// Add them to execution classpaths without exporting a published dependency.
+// Keep platform selection on execution classpaths. A Maven dependency here would
+// select the metadata-only JAR rather than the required platform classifiers.
 sourceSets.configureEach {
   configurations.named(runtimeClasspathConfigurationName) {
     extendsFrom(vulkanRuntimeDependencies.get())

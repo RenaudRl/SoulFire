@@ -1,3 +1,3 @@
 plugins {
-  `sf-vulkan-runtime`
+  `sf-vulkan-runtime-publishing`
 }

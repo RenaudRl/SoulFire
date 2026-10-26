@@ -53,6 +53,14 @@ Linux developers with the required native tools can use `-PvulkanUseDocker=false
 
 The native build downloads checksum-pinned Mesa, Vulkan loader, Vulkan headers, and glslang sources.
 It disables X11 and Wayland integrations and bundles non-system native dependencies.
+
+Linux x86-64 links the required LLVM components statically and hides their internal symbols.
+This removes the standalone LLVM library and its unused dependencies without disabling Vulkan features or runtime CPU detection.
+The measured Linux x86-64 package decreased from 61.5 MiB to 19.3 MiB.
+Linux ARM64, Windows, and macOS retain shared LLVM until equivalent native validation is complete.
+The Debian x86-64 builder also installs `libclang-common-15-dev` for LLVM's static Polly archives.
+Linux x86-64 builds without Docker require LLVM's static development libraries.
+
 Windows retains Mesa's Win32 support, but SoulFire creates no native window or presentation surface.
 Before packaging, a native smoke test creates a CPU device, submits work, and verifies buffer readback.
 

@@ -12,6 +12,7 @@ import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -28,7 +29,8 @@ class VulkanRuntimeTest {
   @BeforeEach
   fun fixture() {
     directory.resolve("settings.gradle").writeText("rootProject.name = 'native-fixture'\ninclude 'vulkan-runtime'\n")
-    directory.resolve("gradle.properties").writeText("org.gradle.jvmargs=-Xmx512m\n")
+    directory.resolve("gradle.properties").writeText("org.gradle.jvmargs=-Xmx512m\nvulkan_runtime_version=1.2.3-SNAPSHOT\n")
+    directory.resolve("LICENSE").writeText("Fixture license\n")
     directory.resolve("build.gradle").writeText(
       """
       plugins {
@@ -58,7 +60,9 @@ class VulkanRuntimeTest {
       """.trimIndent()
     )
     val nativeProject = directory.resolve("vulkan-runtime").createDirectories()
-    nativeProject.resolve("build.gradle").writeText("plugins { id 'sf-vulkan-runtime' }\n")
+    nativeProject.resolve("build.gradle").writeText("plugins { id 'sf-vulkan-runtime-publishing' }\ngroup = 'com.soulfiremc'\n")
+    nativeProject.resolve("README.md").writeText("# Publishing the fixture\n")
+    nativeProject.resolve("ARTIFACTS.md").writeText("# Fixture native artifacts\n")
     nativeProject.resolve("Dockerfile").writeText("FROM debian:bookworm-slim\n")
     nativeProject.resolve("src/main/c").createDirectories().resolve("smoke.c").writeText("int main(void) { return 0; }\n")
     nativeProject.resolve("scripts").createDirectories().resolve("build-vulkan-runtime.py").writeText(
@@ -160,6 +164,51 @@ class VulkanRuntimeTest {
     val pom = DocumentBuilderFactory.newDefaultInstance().newDocumentBuilder()
       .parse(directory.resolve("build/publications/mavenJava/pom-default.xml").toFile())
     assertEquals(0, pom.getElementsByTagName("dependency").length)
+  }
+
+  @Test
+  fun `publication retains all native classifiers with an independent version`() {
+    VulkanPlatforms.all.forEach { prebuilt(it) }
+    val result = runner(
+      ":vulkan-runtime:publishAllPublicationsToStagingRepository",
+      "-PvulkanPlatforms=all", "-PvulkanRuntimeDirectory=prebuilt"
+    ).build()
+    assertNull(result.task(":vulkan-runtime:buildVulkanRuntime"))
+    val publication = directory.resolve("vulkan-runtime/build/publishing/staging/com/soulfiremc/vulkan-runtime/1.2.3-SNAPSHOT")
+    val pomFile = publication.toFile().listFiles()!!.single { it.extension == "pom" }
+    val artifactName = pomFile.nameWithoutExtension
+    val pom = DocumentBuilderFactory.newDefaultInstance().newDocumentBuilder()
+      .parse(pomFile)
+    assertEquals("1.2.3-SNAPSHOT", pom.getElementsByTagName("version").item(0).textContent)
+    assertEquals(0, pom.getElementsByTagName("dependency").length)
+    val digest = MessageDigest.getInstance("SHA-256")
+    VulkanPlatforms.all.forEach { platform ->
+      val artifact = publication.resolve("$artifactName-$platform.jar").toFile()
+      assertTrue(digest.digest(directory.resolve("prebuilt/soulfire-vulkan-$platform.jar").toFile().readBytes())
+        .contentEquals(digest.digest(artifact.readBytes())))
+      assertEquals(platform, GenerateLauncherAssets.platform(artifact.name))
+    }
+    ZipFile(publication.resolve("$artifactName-sources.jar").toFile()).use {
+      assertTrue(it.getEntry("scripts/build-vulkan-runtime.py") != null)
+      assertTrue(it.getEntry("src/main/c/smoke.c") != null)
+    }
+    ZipFile(publication.resolve("$artifactName-javadoc.jar").toFile()).use {
+      assertTrue(it.getEntry("README.md") != null)
+    }
+    assertEquals(TaskOutcome.SUCCESS, runner(
+      ":vulkan-runtime:publishAllPublicationsToStagingRepository",
+      "-PvulkanPlatforms=all", "-PvulkanRuntimeDirectory=prebuilt"
+    ).build().task(":vulkan-runtime:publishVulkanRuntimePublicationToStagingRepository")?.outcome)
+  }
+
+  @Test
+  fun `publication refuses a partial platform set`() {
+    prebuilt(host)
+    val result = runner(
+      ":vulkan-runtime:publishAllPublicationsToStagingRepository",
+      "-PvulkanRuntimeDirectory=prebuilt"
+    ).buildAndFail()
+    assertEquals(TaskOutcome.FAILED, result.task(":vulkan-runtime:validateVulkanPublication")?.outcome)
   }
 
   @Test

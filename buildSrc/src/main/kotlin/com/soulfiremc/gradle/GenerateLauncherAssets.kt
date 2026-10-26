@@ -62,10 +62,11 @@ abstract class GenerateLauncherAssets : DefaultTask() {
           Callable {
             val coordinate = coordinates.get()[file.name]
             val parts = coordinate?.split(':')
+            val bundledProject = parts != null && parts[0] == "com.soulfiremc" && parts[1] != "vulkan-runtime"
             val hash = digest(file, "SHA-256")
             val path = if (parts != null) {
               "libraries/${parts[0].replace('.', '/')}/${parts[1]}/${parts[2]}/" +
-                (if (parts[0] == "com.soulfiremc" || parts[2].endsWith("-SNAPSHOT")) "$hash/" else "") +
+                (if (bundledProject || parts[2].endsWith("-SNAPSHOT")) "$hash/" else "") +
                 "${parts[1]}-${parts[2]}${parts.getOrNull(3)?.let { "-$it" } ?: ""}.jar"
             } else "libraries/com/soulfiremc/${file.nameWithoutExtension}/$hash/${file.name}"
             val artifact = linkedMapOf<String, Any>(
@@ -76,7 +77,7 @@ abstract class GenerateLauncherAssets : DefaultTask() {
             val mc = minecraftLibraries[path.removePrefix("libraries/")]
             val url = when {
               mc != null && digest(file, "SHA-1") == mc["sha1"].asString -> mc["url"].asString
-              parts != null && !parts[2].endsWith("-SNAPSHOT") && parts[0] != "com.soulfiremc" -> {
+              parts != null && !parts[2].endsWith("-SNAPSHOT") && !bundledProject -> {
                 val candidate = "https://maven-central.storage-download.googleapis.com/maven2/" + path.removePrefix("libraries/")
                 if (available(client, cache, candidate, file, hash)) candidate else null
               }
@@ -231,8 +232,8 @@ abstract class GenerateLauncherAssets : DefaultTask() {
       val token = when {
         name.startsWith("soulfire-vulkan-") -> name.removePrefix("soulfire-vulkan-").removeSuffix(".jar")
         "-natives-" in name -> name.substringAfter("-natives-").removeSuffix(".jar")
-        Regex("-(linux|windows|macosx|osx)-(x86_64|arm64|aarch_64|riscv64)(-gpl)?\\.jar$").containsMatchIn(name) ->
-          Regex("-(linux|windows|macosx|osx)-(x86_64|arm64|aarch_64|riscv64)(-gpl)?\\.jar$").find(name)!!.let { "${it.groupValues[1]}-${it.groupValues[2]}" }
+        Regex("-(linux|windows|macos|macosx|osx)-(x86_64|arm64|aarch_64|riscv64)(-gpl)?\\.jar$").containsMatchIn(name) ->
+          Regex("-(linux|windows|macos|macosx|osx)-(x86_64|arm64|aarch_64|riscv64)(-gpl)?\\.jar$").find(name)!!.let { "${it.groupValues[1]}-${it.groupValues[2]}" }
         else -> return null
       }
       val os = when {

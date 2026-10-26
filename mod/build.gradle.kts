@@ -314,6 +314,8 @@ loom {
       systemProperties.put("sf.lavapipe.scene", lavapipeScene)
       systemProperties.put("sf.lavapipe.headless", lavapipeHeadless)
       systemProperties.put("sf.lavapipe.benchmark", lavapipeBenchmark)
+      systemProperties.put("sf.lavapipe.benchmark.warmup", providers.gradleProperty("lavapipeBenchmarkWarmup").orElse("30"))
+      systemProperties.put("sf.lavapipe.benchmark.samples", providers.gradleProperty("lavapipeBenchmarkSamples").orElse("60"))
       systemProperties.put("sf.pov.encoder", providers.gradleProperty("povEncoder").orElse("auto"))
       systemProperties.put("sf.lavapipe.povBenchmark", providers.gradleProperty("povBenchmark").orElse("false"))
       systemProperties.put("sf.lavapipe.expectedDeviceType", providers.gradleProperty("lavapipeExpectedDeviceType").orElse(""))

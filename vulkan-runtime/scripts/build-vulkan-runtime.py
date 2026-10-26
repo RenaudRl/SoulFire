@@ -295,6 +295,34 @@ def main():
     run("cmake", "--build", work / "glslang-build", "--parallel", args.jobs)
     run("cmake", "--install", work / "glslang-build")
     os.environ["PATH"] = str(prefix / "bin") + os.pathsep + os.environ["PATH"]
+    static_llvm = system == "linux" and arch == "x86_64"
+    llvm_link_args = []
+    if static_llvm:
+        # Match Mesa's LLVM components. Hiding all archives also hides Vulkan ICD
+        # entry points; hide only LLVM so unused compiler code can be discarded.
+        llvm_archives = ":".join(
+            output(
+                "llvm-config",
+                "--link-static",
+                "--libnames",
+                "bitwriter",
+                "core",
+                "engine",
+                "executionengine",
+                "instcombine",
+                "mcdisassembler",
+                "mcjit",
+                "native",
+                "scalaropts",
+                "transformutils",
+                "coroutines",
+                "lto",
+            ).split()
+        )
+        llvm_link_args = [
+            f"-Dc_link_args=-Wl,--exclude-libs,{llvm_archives}",
+            f"-Dcpp_link_args=-Wl,--exclude-libs,{llvm_archives}",
+        ]
     mesa_build = work / "mesa-build"
     run(
         "meson",
@@ -312,7 +340,8 @@ def main():
         "-Dgallium-drivers=llvmpipe",
         "-Dvulkan-drivers=swrast",
         "-Dllvm=enabled",
-        "-Dshared-llvm=enabled",
+        "-Dshared-llvm=disabled" if static_llvm else "-Dshared-llvm=enabled",
+        *llvm_link_args,
         # Mesa's Win32 external handles and WSI dispatch share platform declarations.
         # Keep its supported Windows configuration; no window or surface is created.
         "-Dplatforms=windows" if system == "windows" else "-Dplatforms=",
@@ -342,6 +371,15 @@ def main():
         loader_file = next(prefix.rglob("libvulkan.so.1"))
         driver_file = next(prefix.rglob("libvulkan_lvp.so"))
         linux_closure([loader_file, driver_file], stage)
+        if static_llvm:
+            symbols = output(
+                "nm", "-D", "--defined-only", "--demangle", stage / driver_file.name
+            )
+            if any(
+                "llvm::" in line or re.search(r"\bLLVM\w+", line)
+                for line in symbols.splitlines()
+            ):
+                raise RuntimeError("The Vulkan driver exports internal LLVM symbols")
     elif system == "macos":
         loader_file = next(prefix.rglob("libvulkan.1.dylib"))
         driver_file = next(prefix.rglob("libvulkan_lvp.dylib"))

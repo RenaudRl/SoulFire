@@ -22,6 +22,7 @@ gradle-plugin-indra-git = "net.kyori:indra-git:4.1.0"
 gradle-plugin-loom = "net.fabricmc:fabric-loom:1.17.21"
 gradle-plugin-spotless = "com.diffplug.spotless:spotless-plugin-gradle:8.10.3"
 gradle-plugin-freefair = "io.freefair.gradle:maven-plugin:9.7.0"
+gradle-plugin-maven-publish = "com.vanniktech:gradle-maven-publish-plugin:0.37.0"
 log4j-api = { module = "org.apache.logging.log4j:log4j-api", version.ref = "log4j" }
 log4j-core = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }
 log4j-slf4j2-impl = { module = "org.apache.logging.log4j:log4j-slf4j2-impl", version.ref = "log4j" }

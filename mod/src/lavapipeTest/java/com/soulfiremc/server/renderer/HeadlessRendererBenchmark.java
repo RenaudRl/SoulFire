@@ -36,12 +36,13 @@ import java.util.Map;
 final class HeadlessRendererBenchmark {
   private static final int WIDTH = 854;
   private static final int HEIGHT = 480;
-  private static final int WARMUP = 30;
-  private static final int SAMPLES = 60;
+  private static final int WARMUP = Integer.getInteger("sf.lavapipe.benchmark.warmup", 30);
+  private static final int SAMPLES = Integer.getInteger("sf.lavapipe.benchmark.samples", 60);
 
   private HeadlessRendererBenchmark() {}
 
   static void run(Minecraft minecraft, Path output, String scene, boolean isolated) throws IOException {
+    if (WARMUP < 0 || SAMPLES < 2) throw new IllegalArgumentException("Benchmark requires nonnegative warmup and at least two samples");
     if (!scene.startsWith("stress-")) throw new IllegalArgumentException("Benchmark requires a world fixture");
     if (minecraft.windowSurface() != null) throw new IllegalStateException("Benchmark must have no presentation surface");
     var device = RenderSystem.getDevice().getDeviceInfo();
@@ -68,6 +69,7 @@ final class HeadlessRendererBenchmark {
     }
     validate(image);
     var sorted = samples.stream().mapToDouble(Double::doubleValue).sorted().toArray();
+    var median = SAMPLES % 2 == 0 ? (sorted[SAMPLES / 2 - 1] + sorted[SAMPLES / 2]) / 2 : sorted[SAMPLES / 2];
     var report = new LinkedHashMap<String, Object>();
     report.put("scene", scene);
     report.put("width", WIDTH);
@@ -81,13 +83,13 @@ final class HeadlessRendererBenchmark {
     report.put("headless", true);
     report.put("method", "Frozen world, production VulkanRenderer.renderWithResult through BufferedImage, including camera update, extraction, rendering, GPU fences and readback. Warm scene cache. Excludes startup, simulation, PNG encoding, network and switching bots.");
     report.put("coldCaptureMs", coldNanos / 1_000_000.0);
-    report.put("capture", Map.of("medianMs", (sorted[SAMPLES / 2 - 1] + sorted[SAMPLES / 2]) / 2,
+    report.put("capture", Map.of("medianMs", median,
       "meanMs", Arrays.stream(sorted).average().orElseThrow(),
       "p95Ms", sorted[(int) Math.ceil(SAMPLES * 0.95) - 1], "samplesMs", samples));
     Files.writeString(output.resolve("headless-benchmark.json"), new GsonBuilder().setPrettyPrinting().create().toJson(report));
     ImageIO.write(image, "PNG", output.resolve("headless-benchmark.png").toFile());
     System.out.println("Headless benchmark " + scene + " on " + device.name() + ": median "
-      + (sorted[SAMPLES / 2 - 1] + sorted[SAMPLES / 2]) / 2 + " ms");
+      + median + " ms");
   }
 
   private static void validateLiveCamera(Minecraft minecraft, Path output) throws IOException {
