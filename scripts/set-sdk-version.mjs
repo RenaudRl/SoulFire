@@ -11,10 +11,7 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
 }
 
 async function updateJsonVersion(path) {
-  const contents = await readFile(path, "utf8");
-  const document = JSON.parse(contents);
-  document.version = version;
-  await writeFile(path, `${JSON.stringify(document, null, 2)}\n`);
+  await replaceVersion(path, /^  "version": "[^"]+",$/m, `  "version": "${version}",`);
 }
 
 async function replaceVersion(path, pattern, replacement) {
