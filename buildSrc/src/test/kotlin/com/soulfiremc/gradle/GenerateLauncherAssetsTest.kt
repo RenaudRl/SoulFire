@@ -1,6 +1,11 @@
 package com.soulfiremc.gradle
 
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -22,6 +27,72 @@ class GenerateLauncherAssetsTest {
       }
     }
     return file
+  }
+
+  private fun minecraftLibraries(vararg classifiers: String): JsonObject = JsonObject().apply {
+    add("libraries", JsonArray().apply {
+      classifiers.forEach { classifier ->
+        add(JsonObject().apply {
+          addProperty("name", "org.lwjgl:lwjgl:3.4.3:$classifier")
+          add("downloads", JsonObject().apply { add("artifact", JsonObject()) })
+        })
+      }
+    })
+  }
+
+  @Test
+  fun `Minecraft native plan covers every platform independently of the build host`() {
+    val metadata = minecraftLibraries(
+      "natives-linux", "natives-windows", "natives-windows-arm64", "natives-macos", "natives-macos-arm64", "natives-windows-x86"
+    )
+
+    val natives = GenerateLauncherAssets.minecraftNatives(metadata)
+
+    assertEquals(VulkanPlatforms.all.toSet(), natives.map { it.platform }.toSet())
+    assertEquals(6, natives.size)
+    natives.forEach { native ->
+      assertEquals(native.platform, GenerateLauncherAssets.platform(File(native.path).name))
+      assertEquals("3.4.3", native.name.split(':')[2])
+      if (native.platform == "linux-arm64") assertNull(native.download) else assertNotNull(native.download)
+    }
+  }
+
+  @Test
+  fun `an explicit Linux ARM64 native keeps its Minecraft download metadata`() {
+    val metadata = minecraftLibraries(
+      "natives-linux", "natives-linux-arm64", "natives-windows", "natives-windows-arm64", "natives-macos", "natives-macos-arm64"
+    )
+
+    val natives = GenerateLauncherAssets.minecraftNatives(metadata)
+
+    assertEquals(6, natives.size)
+    assertNotNull(natives.single { it.platform == "linux-arm64" }.download)
+  }
+
+  @Test
+  fun `platform-specific native modules do not acquire unsupported classifiers`() {
+    val metadata = minecraftLibraries(
+      "natives-linux", "natives-windows", "natives-windows-arm64", "natives-macos", "natives-macos-arm64"
+    )
+    val libraries = metadata.getAsJsonArray("libraries")
+    listOf("natives-macos", "natives-macos-arm64").forEach { classifier ->
+      libraries.add(JsonObject().apply {
+        addProperty("name", "org.lwjgl:lwjgl-vulkan:3.4.3:$classifier")
+        add("downloads", JsonObject().apply { add("artifact", JsonObject()) })
+      })
+    }
+
+    val natives = GenerateLauncherAssets.minecraftNatives(metadata)
+
+    assertEquals(setOf("macos-x86_64", "macos-arm64"), natives.filter { it.name.startsWith("org.lwjgl:lwjgl-vulkan:") }.map { it.platform }.toSet())
+    assertEquals(8, natives.size)
+  }
+
+  @Test
+  fun `incomplete Minecraft native coverage stops manifest generation`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      GenerateLauncherAssets.minecraftNatives(minecraftLibraries("natives-linux"))
+    }
   }
 
   @Test

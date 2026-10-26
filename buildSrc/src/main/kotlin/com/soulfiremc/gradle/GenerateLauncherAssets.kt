@@ -94,6 +94,25 @@ abstract class GenerateLauncherAssets : DefaultTask() {
           }
         }
         assets.addAll(executor.invokeAll(jobs).map { it.get() }.distinctBy { it["path"] })
+        val resolvedPaths = assets.map { it["path"] }.toSet()
+        val nativeJobs = minecraftNatives(version).filter { "libraries/${it.path}" !in resolvedPaths }.map { native ->
+          Callable {
+            val download = native.download ?: run {
+              val url = "https://maven-central.storage-download.googleapis.com/maven2/${native.path}"
+              val sha1 = fetch(client, cache, "$url.sha1").readText().trim().split(Regex("\\s+")).first().lowercase()
+              require(sha1.matches(Regex("[0-9a-fA-F]{40}"))) { "Invalid checksum for $url" }
+              val file = fetch(client, cache, url, sha1)
+              JsonObject().apply {
+                addProperty("url", url)
+                addProperty("sha1", sha1)
+                addProperty("size", file.length())
+              }
+            }
+            remote(client, cache, native.name, "libraries/${native.path}", "library", download) +
+              ("platform" to native.platform)
+          }
+        }
+        assets.addAll(executor.invokeAll(nativeJobs).map { it.get() })
       }
 
       val clientDownload = version.getAsJsonObject("downloads").getAsJsonObject("client")
@@ -190,6 +209,45 @@ abstract class GenerateLauncherAssets : DefaultTask() {
   private fun request(url: String) = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofMinutes(3)).build()
 
   companion object {
+    private val nativePlatforms = mapOf(
+      "linux" to "linux-x86_64", "linux-arm64" to "linux-arm64",
+      "windows" to "windows-x86_64", "windows-arm64" to "windows-arm64",
+      "macos" to "macos-x86_64", "macos-arm64" to "macos-arm64"
+    )
+
+    data class MinecraftNative(val name: String, val platform: String, val download: JsonObject?) {
+      val path: String
+        get() = name.split(':').let { (group, artifact, version, classifier) ->
+          "${group.replace('.', '/')}/$artifact/$version/$artifact-$version-$classifier.jar"
+        }
+    }
+
+    fun minecraftNatives(metadata: JsonObject): List<MinecraftNative> {
+      val natives = metadata.getAsJsonArray("libraries").mapNotNull { element ->
+        val library = element.asJsonObject
+        val name = library["name"].asString
+        val parts = name.split(':')
+        if (parts.size != 4 || parts[0] != "org.lwjgl" || !parts[3].startsWith("natives-")) return@mapNotNull null
+        val platform = nativePlatforms[parts[3].removePrefix("natives-")] ?: return@mapNotNull null
+        val download = requireNotNull(library.getAsJsonObject("downloads")?.getAsJsonObject("artifact")) {
+          "Missing Minecraft native download: $name"
+        }
+        MinecraftNative(name, platform, download)
+      }.associateBy { it.name }.toMutableMap()
+
+      // Mojang omits Linux ARM64. LWJGL publishes matching classifiers on Central.
+      natives.values.filter { it.platform == "linux-x86_64" }.toList().forEach { native ->
+        val arm = native.copy(
+          name = native.name.substringBeforeLast(':') + ":natives-linux-arm64", platform = "linux-arm64", download = null
+        )
+        natives.putIfAbsent(arm.name, arm)
+      }
+      require(natives.values.filter { it.name.startsWith("org.lwjgl:lwjgl:") }.map { it.platform }.toSet() == nativePlatforms.values.toSet()) {
+        "Minecraft metadata must provide LWJGL system natives for all six SoulFire platforms"
+      }
+      return natives.values.toList()
+    }
+
     fun runtimeLibraries(files: Set<File>, coordinates: Map<String, String>): List<File> {
       // Fabric discovers these from the managed mod. Keep transitive dependencies in the
       // runtime, but do not also ship byte-identical copies of its declared nested JARs.
@@ -231,7 +289,9 @@ abstract class GenerateLauncherAssets : DefaultTask() {
     fun platform(name: String): String? {
       val token = when {
         name.startsWith("soulfire-vulkan-") -> name.removePrefix("soulfire-vulkan-").removeSuffix(".jar")
-        "-natives-" in name -> name.substringAfter("-natives-").removeSuffix(".jar")
+        "-natives-" in name -> return requireNotNull(nativePlatforms[name.substringAfter("-natives-").removeSuffix(".jar")]) {
+          "Unsupported native platform: $name"
+        }
         Regex("-(linux|windows|macos|macosx|osx)-(x86_64|arm64|aarch_64|riscv64)(-gpl)?\\.jar$").containsMatchIn(name) ->
           Regex("-(linux|windows|macos|macosx|osx)-(x86_64|arm64|aarch_64|riscv64)(-gpl)?\\.jar$").find(name)!!.let { "${it.groupValues[1]}-${it.groupValues[2]}" }
         else -> return null
