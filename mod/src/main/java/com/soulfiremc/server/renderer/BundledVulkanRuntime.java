@@ -51,10 +51,12 @@ public final class BundledVulkanRuntime {
   public static void initialize() {
     if (Configuration.VULKAN_LIBRARY_NAME.get() != null) {
       // An explicit LWJGL override is useful for driver development and must retain its usual meaning.
+      log.info("Loading configured Vulkan library");
       VK.create();
       return;
     }
     var platform = NativeRuntimeBundle.platformId(System.getProperty("os.name"), System.getProperty("os.arch"));
+    log.info("Loading bundled Vulkan libraries for {}", platform);
     try {
       var bundle = NativeRuntimeBundle.extract(BundledVulkanRuntime.class.getClassLoader(), platform,
         SFPathConstants.baseDirectory().resolve("natives/vulkan"));

@@ -32,10 +32,12 @@ import java.util.HexFormat;
 final class AssetCache {
   private final Path directory;
   private final Source source;
+  private final StartupProgress progress;
 
-  AssetCache(Path directory, Source source) {
+  AssetCache(Path directory, Source source, StartupProgress progress) {
     this.directory = directory.toAbsolutePath().normalize();
     this.source = source;
+    this.progress = progress;
   }
 
   Path materialize(LauncherManifest.Asset asset) throws IOException {
@@ -45,13 +47,16 @@ final class AssetCache {
     }
     if (Files.isRegularFile(destination) && Files.size(destination) == asset.size()
       && checksum(destination).equals(asset.sha256())) {
+      progress.cached();
       return destination;
     }
 
-    IO.println("Preparing " + asset.name());
+    if (Files.exists(destination)) {
+      StartupProgress.log("Cached file failed verification; replacing " + asset.name());
+    }
     Files.createDirectories(destination.getParent());
     var temporary = Files.createTempFile(destination.getParent(), ".download-", ".tmp");
-    try {
+    try (var transfer = progress.start(asset)) {
       var digest = sha256();
       long size = 0;
       try (var input = source.open(asset); var output = Files.newOutputStream(temporary)) {
@@ -64,6 +69,7 @@ final class AssetCache {
           }
           digest.update(buffer, 0, count);
           output.write(buffer, 0, count);
+          transfer.advance(count);
         }
       }
       if (size != asset.size() || !HexFormat.of().formatHex(digest.digest()).equals(asset.sha256())) {
@@ -74,7 +80,10 @@ final class AssetCache {
       } catch (AtomicMoveNotSupportedException _) {
         Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING);
       }
+      transfer.complete();
       return destination;
+    } catch (IOException e) {
+      throw new IOException("Failed to " + (asset.resource() == null ? "download " : "unpack ") + asset.name() + ": " + e.getMessage(), e);
     } finally {
       Files.deleteIfExists(temporary);
     }

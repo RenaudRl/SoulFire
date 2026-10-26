@@ -45,13 +45,13 @@ class AssetCacheTest {
   void reuseVerifiedArtifactAcrossLauncherRunsWithoutOpeningSource() throws Exception {
     var requests = new AtomicInteger();
     var asset = asset(content);
-    var first = new AssetCache(directory, _ -> {
+    var first = cache(_ -> {
       requests.incrementAndGet();
       return new ByteArrayInputStream(content);
     }).materialize(asset);
     var modified = Files.getLastModifiedTime(first);
 
-    var cached = new AssetCache(directory, _ -> {
+    var cached = cache(_ -> {
       throw new IOException("Offline");
     }).materialize(asset);
 
@@ -69,7 +69,7 @@ class AssetCacheTest {
     Files.createDirectories(path.getParent());
     Files.write(path, corrupt);
 
-    var cache = new AssetCache(directory, _ -> new ByteArrayInputStream(content));
+    var cache = cache(_ -> new ByteArrayInputStream(content));
     assertArrayEquals(content, Files.readAllBytes(cache.materialize(asset)));
   }
 
@@ -82,8 +82,11 @@ class AssetCacheTest {
     Files.createDirectories(path.getParent());
     Files.write(path, previous);
 
-    var cache = new AssetCache(directory, _ -> new ByteArrayInputStream(previous));
+    var progress = new StartupProgress(1);
+    var cache = new AssetCache(directory, _ -> new ByteArrayInputStream(previous), progress);
     assertThrows(IOException.class, () -> cache.materialize(asset));
+    assertEquals(0, progress.snapshot().ready());
+    assertEquals(0, progress.snapshot().activeDownloads());
     assertArrayEquals(previous, Files.readAllBytes(path));
     try (var files = Files.list(path.getParent())) {
       assertEquals(1, files.count());
@@ -93,7 +96,7 @@ class AssetCacheTest {
   @Test
   void discardInterruptedAndOversizedDownloads() throws Exception {
     var asset = asset(content);
-    var interrupted = new AssetCache(directory, _ -> new InputStream() {
+    var interrupted = cache(_ -> new InputStream() {
       private int offset;
 
       @Override
@@ -105,12 +108,16 @@ class AssetCacheTest {
       }
     });
     assertThrows(IOException.class, () -> interrupted.materialize(asset));
-    var oversized = new AssetCache(directory, _ -> new ByteArrayInputStream(new byte[content.length + 1]));
+    var oversized = cache(_ -> new ByteArrayInputStream(new byte[content.length + 1]));
     assertThrows(IOException.class, () -> oversized.materialize(asset));
     assertFalse(Files.exists(directory.resolve(asset.path())));
     try (var files = Files.list(directory.resolve(asset.path()).getParent())) {
       assertEquals(0, files.count());
     }
+  }
+
+  private AssetCache cache(AssetCache.Source source) {
+    return new AssetCache(directory, source, new StartupProgress(1));
   }
 
   private LauncherManifest.Asset asset(byte[] bytes) throws Exception {

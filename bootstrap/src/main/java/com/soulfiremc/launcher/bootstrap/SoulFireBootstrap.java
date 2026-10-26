@@ -28,6 +28,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 public final class SoulFireBootstrap {
@@ -50,23 +52,30 @@ public final class SoulFireBootstrap {
     try {
       var baseDirectory = basePath.toAbsolutePath().normalize();
       Files.createDirectories(baseDirectory);
+      StartupProgress.log("Reading runtime manifest");
       var manifest = LauncherManifest.read(SoulFireBootstrap.class.getResourceAsStream("/META-INF/soulfire-assets.json"));
       var versionOverride = System.getProperty("sf.mcVersionOverride", manifest.minecraftVersion());
       if (!versionOverride.equals(manifest.minecraftVersion())) {
         throw new IllegalArgumentException("This launcher contains fixed Minecraft " + manifest.minecraftVersion() + " assets");
       }
       var platform = LauncherManifest.platform();
+      var assets = manifest.assets().stream().filter(asset -> asset.appliesTo(platform)).toList();
+      StartupProgress.log("Checking " + assets.size() + " runtime files ("
+        + StartupProgress.size(assets.stream().mapToLong(LauncherManifest.Asset::size).sum()) + ") for "
+        + platform + "; Minecraft " + manifest.minecraftVersion());
       var runtime = new ArrayList<Path>();
+      var progress = new StartupProgress(assets.size());
       try (var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30)).build();
            var lockChannel = FileChannel.open(baseDirectory.resolve(".asset-cache.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-           var lock = lockChannel.lock()) {
+           var lock = acquireCacheLock(lockChannel)) {
         if (!lock.isValid()) {
           throw new IOException("Unable to lock the SoulFire asset cache");
         }
-        var cache = new AssetCache(baseDirectory, asset -> open(client, asset));
-        try (var executor = Executors.newFixedThreadPool(6)) {
-          var downloads = manifest.assets().stream()
-            .filter(asset -> asset.appliesTo(platform))
+        var cache = new AssetCache(baseDirectory, asset -> open(client, asset), progress);
+        try (var executor = Executors.newFixedThreadPool(6);
+             var reports = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("SoulFire-startup-progress").daemon().factory())) {
+          reports.scheduleAtFixedRate(progress::report, 2, 2, TimeUnit.SECONDS);
+          var downloads = assets.stream()
             .map(asset -> executor.submit(() -> new PreparedAsset(asset, cache.materialize(asset))))
             .toList();
           try {
@@ -88,7 +97,9 @@ public final class SoulFireBootstrap {
             throw new IOException("Failed to prepare pinned runtime assets", e instanceof ExecutionException ? e.getCause() : e);
           }
         }
+        progress.finish();
       }
+      StartupProgress.log("Starting runtime with " + runtime.size() + " libraries");
       System.setProperty("sf.assetIndex", manifest.assetIndex());
       System.setProperty("sf.soundIndex", baseDirectory.resolve("assets/indexes/soulfire-sounds-" + manifest.minecraftVersion() + ".json").toString());
       System.setProperty("java.class.path", runtime.stream().map(Path::toString).collect(Collectors.joining(File.pathSeparator)));
@@ -118,6 +129,15 @@ public final class SoulFireBootstrap {
   }
 
   private record PreparedAsset(LauncherManifest.Asset asset, Path file) {
+  }
+
+  private static FileLock acquireCacheLock(FileChannel channel) throws IOException {
+    var lock = channel.tryLock();
+    if (lock != null) {
+      return lock;
+    }
+    StartupProgress.log("Waiting for another SoulFire process to release the runtime cache");
+    return channel.lock();
   }
 
   private static InputStream open(HttpClient client, LauncherManifest.Asset asset) throws IOException {

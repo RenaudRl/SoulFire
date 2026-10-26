@@ -72,13 +72,16 @@ public final class SoulFirePostLibLauncher {
       System.setProperty("sf.bootstrap.class", bootstrapClassName);
       System.setProperty("sf.initial.arguments", joinBase64(args));
 
+      IO.println("[bootstrap] Installing startup hooks");
       injectEarlyMixins();
+      IO.println("[bootstrap] Installing SoulFire mod");
       setupManagedMods(basePath);
       System.setProperty(SystemProperties.GAME_MAPPING_NAMESPACE, "official");
       System.setProperty(SystemProperties.GAME_JAR_PATH_CLIENT, System.getProperty("sf.minecraftJar"));
       System.setProperty(SystemProperties.RUNTIME_MAPPING_NAMESPACE, "official");
 
       var assetIndex = System.getProperty("sf.assetIndex");
+      IO.println("[bootstrap] Starting Fabric Loader");
       KnotClient.main(new String[]{
         "--graphicsBackend", "VULKAN",
         "--username", "SoulFire",
@@ -113,7 +116,6 @@ public final class SoulFirePostLibLauncher {
 
     try {
       transformerManager.hookInstrumentation(Agents.getInstrumentation());
-      IO.println("Used Runtime Agent to inject mixins");
     } catch (IOException t) {
       throw new IllegalStateException("Failed to inject mixins", t);
     }
